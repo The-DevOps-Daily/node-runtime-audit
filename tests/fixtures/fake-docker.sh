@@ -16,7 +16,7 @@ exec)
   *dddddddddddd*) echo v24.22.1 ;;
   *eeeeeeeeeeee*) echo v24.22.1 ;;
   *ffffffffffff*) echo "Error response from daemon: container is paused" >&2; exit 1 ;;
-  *) echo "exec: node: not found" >&2; exit 127 ;;
+  *) echo 'OCI runtime exec failed: exec failed: unable to start container process: exec: "node": executable file not found in $PATH: unknown' >&2; exit 127 ;;
   esac
   ;;
 inspect)

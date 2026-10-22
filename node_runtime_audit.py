@@ -351,7 +351,7 @@ def judge_binary(info, fixed, name_hint=None):
         reason = info["error"]
     if not info.get("version") and name_hint:
         reason += "; from path: %s (a hint, not proof)" % name_hint
-    if not info.get("version") and info.get("exec_refused"):
+    if info.get("exec_refused"):
         reason += "; --exec-version refused: %s" % info["exec_refused"]
     if info.get("shared"):
         # Distribution builds link system libraries (Debian: libnode and
@@ -729,7 +729,7 @@ NODEISH_RE = re.compile(r"^\s*(Exec\w*|Environment)\s*=.*(^|[\s/=\"'])(node|node
 SYSTEMD_DIRS = ["/etc/systemd/system", "/run/systemd/system", "/usr/local/lib/systemd/system",
                 "/lib/systemd/system", "/usr/lib/systemd/system", "/etc/systemd/user",
                 "~/.config/systemd/user"]
-UNIT_PATTERNS = ("*.service", "*.service.d/*.conf", "*.timer", "*/*.service")
+UNIT_PATTERNS = ("*.service", "*.service.d/*.conf", "*.timer")
 
 
 def systemd_sources(dirs):
@@ -741,8 +741,11 @@ def systemd_sources(dirs):
         for pat in UNIT_PATTERNS:
             for f in sorted(glob.glob(os.path.join(d, pat))):
                 real = os.path.realpath(f)
-                if real in seen or not os.path.isfile(f):
-                    continue  # listed twice through symlinks, or not a regular file
+                if real in seen or os.path.islink(f) or not os.path.isfile(f):
+                    # Symlinked units are skipped (an enabled unit's real file
+                    # sits in one of these directories); so is anything that
+                    # is not a regular file.
+                    continue
                 seen.add(real)
                 read_unit(f, sources)
     return sources
@@ -907,7 +910,7 @@ def pm2_entry(entry, ctx, procs_by_pid, table, daemon=None, saved=False):
     if other_interp and not running:
         pass
     elif d:
-        r = judge_path(d, ctx)
+        r = judge_path(os.path.join(d, "nodejs" if interp == "nodejs" else "node"), ctx)
         r["what"] = "PATH node"
         if FNM_MULTISHELL_RE.search(d):
             r["reason"] += "; fnm multishell dir: gone after a reboot"
@@ -1034,8 +1037,9 @@ def container_checks(cli, fixed, run_exec=True):
                 first = (r.stdout or "").strip().splitlines()
                 if r.returncode == 0 and first and VERSION_RE.match(first[0]):
                     version = first[0].strip()
-                elif r.returncode == 127 or "executable file not found" in (r.stderr or ""):
-                    no_node = True
+                elif re.search(r'"node": executable file not found|executable file .{0,2}node.{0,2} not found',
+                                   r.stderr or ""):
+                    no_node = True  # docker and podman both say this when node is not on PATH
                 else:
                     exec_error = "exec exit %d: %s" % (r.returncode, " ".join(
                         (r.stderr or r.stdout or "").strip().splitlines()[:1]))

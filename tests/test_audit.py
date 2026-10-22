@@ -611,6 +611,14 @@ class FileSafetyTest(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "unknown")
         self.assertIn("has 2 hard links", rows[0]["reason"])
 
+    def test_symlinked_units_are_skipped(self):
+        units = os.path.join(self.d, "units")
+        os.makedirs(units)
+        secret = os.path.join(self.d, "not-a-unit")
+        open(secret, "w").write("ExecStart=/opt/node-v24.1.0/bin/node\n")
+        os.symlink(secret, os.path.join(units, "evil.service"))
+        self.assertEqual(nra.systemd_sources([units]), [])
+
     def test_units_of_other_users_are_skipped(self):
         units = os.path.join(self.d, "units")
         os.makedirs(units)
@@ -641,7 +649,8 @@ class Pm2AndPathTest(unittest.TestCase):
                                          "PATH": "%s/a:%s/b" % (self.d, self.d)}}
         e = nra.pm2_entry(entry, nra.Context(FIXED), {}, {})
         f = next(x for x in e["findings"] if x["what"] == "PATH node")
-        self.assertEqual(f["path"], os.path.join(self.d, "b"))
+        self.assertEqual(f["path"], os.path.join(self.d, "b/nodejs"))
+        self.assertEqual(f["node"], os.path.join(self.d, "b/nodejs"))
 
     def test_malformed_entry_is_unknown(self):
         for bad in ("x", {"pm2_env": "x"}, 3):

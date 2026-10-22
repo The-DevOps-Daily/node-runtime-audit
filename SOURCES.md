@@ -35,7 +35,7 @@ The advisory body for CVE-2026-111497 reads: "A flaw in Node.js can cause Node.j
 
 From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md` in [nodejs/node](https://github.com/nodejs/node):
 
-- All three list "(CVE-2026-111497) deps: brotli: cherry-pick 0ed4268a4401abcb44720963" and "(CVE-2026-111497) src: expose `BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH`".
+- All three list two CVE-2026-111497 entries: a cherry-pick of an upstream Brotli commit into `deps/brotli`, and a matching change in Node's zlib binding.
 - All three list "crypto: update root certificates to NSS 3.131.1" and "tls: reject chains containing blocked public keys".
 - 24.22.1 and 26.12.1 list "(CVE-2026-105483) tls: fix ip normalization regression". 22.23.4 does not, which matches the advisory (26 and 24 only).
 - All three list "(CVE-2026-106069) tls: reject non-canonical IP addresses". Only the 26.12.1 entry also names CVE-2026-106072 on that line, although the advisory says CVE-2026-106072 affects 22 and 24 too.
@@ -49,7 +49,7 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 
 ### Brotli upstream
 
-- The cherry-picked commit is [google/brotli 0ed4268](https://github.com/google/brotli/commit/0ed4268a4401abcb4472096340477cf4af7d1a2b), 2026-02-27, "Detect and report invalid stream earlier.", changing `c/dec/decode.c` and `c/include/brotli/decode.h`.
+- The cherry-picked commit is in the upstream Brotli decoder (google/brotli, February 2026). We leave out its details here on purpose.
 - Brotli published [v1.2.1](https://github.com/google/brotli/releases/tag/v1.2.1), v1.1.1 and v1.0.10 on 2026-10-21 between 19:26:58 and 19:27:34 UTC. Each release note says: "SECURITY - CVE-2026-111497: out-of-bounds write permits remote code execution".
 - Debian builds Node against the system Brotli: `debian/rules` of nodejs 20.19.2+dfsg-1+deb13u2 (trixie) passes `--shared-brotli` (and `--shared`, `--shared-zlib`, `--shared-openssl`), and `debian/control` build-depends on `libbrotli-dev` ([sources.debian.org](https://sources.debian.org/src/nodejs/20.19.2+dfsg-1+deb13u2/debian/rules/)). For such builds the Brotli fix comes from the distribution's brotli package.
 - At 2026-10-22 ~06:09Z the Debian security tracker had no page for CVE-2026-111497 (HTTP 404) and Ubuntu's notices API returned 0 notices for it.
@@ -83,7 +83,7 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: on the Pi, `pgrep -c node` and `pgrep -c -x node` both returned 0 while five processes ran a `node` binary, named `PM2 v6.0.14: Go`, `MainThread` and `next-server (v1` in `/proc/<pid>/comm`.
 
-- `examples/run-20261022T070555Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T07:05:55Z, as the user that owns the Node processes. The script refused to run the `pm2` CLI because the file is world-writable (mode 777), so the live pm2 list is skipped and reported as unknown.
+- `examples/run-20261022T071033Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T07:10:33Z, as the user that owns the Node processes. The script refused to run the `pm2` CLI because the file is world-writable (mode 777), so the live pm2 list is skipped and reported as unknown.
 - `results/pm2-path-20261022T070504Z.txt`: on the same Pi, the saved pm2 list (`dump.pm2`) and the process the pm2 daemon started (`/proc/<pid>/environ`) both have the v24.14.0 install first on `PATH`.
 - On the same Pi, the first line of the app's `node_modules/.bin/next` is `#!/usr/bin/env node` (checked with `head -1`), which is why `bun run dev` ends up starting Node processes.
 - The fnm `default` alias on the Pi was changed to v24.22.1 at 06:03 UTC on 22 October (the symlink's mtime); the pm2 daemon kept running v24.14.0.

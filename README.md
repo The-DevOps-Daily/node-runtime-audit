@@ -7,7 +7,7 @@ python3 node_runtime_audit.py      # as the user that owns the Node processes; r
 
 Patching Node is a one-line version bump. Finding every Node your servers actually run is the work. This script lists the Node binary behind every running process and the places that will start Node later, and checks each one against the [Node.js security release of 21 October 2026](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) (fixed in 22.23.4, 24.22.1 and 26.12.1; every end-of-life line counts as vulnerable).
 
-It is one file of standard-library Python (3.8+, Linux). It never restarts, edits or upgrades anything, and it reads only five things: `/proc`, `pm2 jlist`, `crontab -l`, systemd unit files, and `node --version` inside running containers.
+It is one file of standard-library Python (3.8+, Linux). It never restarts, edits or upgrades anything. Its sources are `/proc`, the output of `pm2 jlist` and `crontab -l`, systemd unit files, and `node --version` inside running containers. Besides those it runs `systemctl show` for pm2 units and `docker`/`podman` `ps` and `inspect`, and it looks at file metadata (`stat`) for paths it finds. By default it never runs a binary it finds on the host.
 
 Run it as the user that owns the Node processes (the pm2 user, the app user). Running it as root is not needed. On a host where several users run Node, run it once as each of them.
 
@@ -25,7 +25,7 @@ Written for the DevOps Daily post: https://devops-daily.com/posts/node-october-2
 
 Node binaries named in pm2 entries, crontabs and units are not opened. Their version comes from a running process that uses the same file; otherwise from the path as a hint: a path that names an unfixed version (`.../v24.14.0/bin/node`) counts as vulnerable, one that names a fixed version stays unknown. nvm, fnm, volta, asdf, mise, nodenv and n installs are listed the same way, for information.
 
-Exit code: **1** if anything runs or will start a vulnerable Node, else **2** if anything it looked at could not be checked (a failed `pm2 jlist`, `crontab -l` or `docker ps`, an unreadable unit, a binary without an embedded version), else **0**. Unknown is never reported as patched. Distribution builds that link the system Brotli library (Debian's `nodejs`) are reported as unknown, because the fix for them comes from the distribution's packages, not from the version number.
+Exit code: **1** if anything runs or will start a vulnerable Node, else **2** if anything it looked at could not be checked (a failed `pm2 jlist`, `crontab -l` or `docker ps`, an unreadable unit, a binary without an embedded version), else **0**: nothing vulnerable or unknown within what it covers, which includes finding no Node at all. Unknown is never reported as patched. Distribution builds that link the system Brotli library (Debian's `nodejs`) are reported as unknown, because the fix for them comes from the distribution's packages, not from the version number.
 
 ```bash
 python3 node_runtime_audit.py --json              # machine-readable
@@ -51,7 +51,7 @@ for h in deploy@web1 deploy@web2; do ssh "$h" 'python3 - --json' < node_runtime_
 ## Results
 
 - `results/pm2-lab-20261022T063002Z.txt`: pm2 6.0.14 with Node v24.14.0 and v24.22.1.
-- `examples/run-20261022T070555Z.txt`: the script on our Raspberry Pi.
+- `examples/run-20261022T071033Z.txt`: the script on our Raspberry Pi.
 - `results/pm2-path-20261022T070504Z.txt`: the pm2 app's `PATH` on the Pi, saved and running.
 - `results/registry-20261022T062338Z.json`: 24 official tags, amd64 and arm64.
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: `pgrep -c node` returns 0 on the Pi while five processes run a `node` binary.
@@ -62,7 +62,7 @@ Facts and their sources are in [SOURCES.md](SOURCES.md).
 
 Everything the script finds can come from someone else: binaries, unit files, container names, process titles. So:
 
-- **It never runs a binary it finds on the host.** The only version source for a running process is its binary, read through `/proc/<pid>/exe`: the `node-vX.Y.Z-headers.tar.gz` URL that official builds compile in, and only from an ELF file (a shell wrapper can mention any version). The read must be complete and the file unchanged while it is read. A version that only a directory name gives is a hint and never counts as patched.
+- **By default it never runs a binary it finds on the host.** The only version source for a running process is its binary, read through `/proc/<pid>/exe`: the `node-vX.Y.Z-headers.tar.gz` URL that official builds compile in, and only from an ELF file (a shell wrapper can mention any version). The read must be complete and the file unchanged while it is read. A version that only a directory name gives is a hint and never counts as patched.
 - **Files are pinned before they are read.** `/proc/<pid>/exe` and unit files are opened with `O_PATH` (which never runs a device's open and never blocks on a FIFO), checked with `fstat` to be a regular file with exactly one link (a deleted binary has none), and only then reopened for reading through `/proc/self/fd/N` with `O_RDONLY | O_NONBLOCK`, so nothing can be swapped in between. Unit files owned by anyone other than root or you are skipped, and nothing a unit refers to (`EnvironmentFile=`, scripts) is read.
 - **The commands it runs** are `pm2 jlist` (your own pm2, as you, only when a `PM2 v... God Daemon (<PM2_HOME>)` process of yours is running and the `pm2` CLI is owned by you or root and not writable by group or others), `crontab -l`, `systemctl show` for pm2 units, and `docker`/`podman` `ps`, `inspect` and `exec <id> node --version`. The last one runs the container's own binary inside the container, never on the host; `--no-container-exec` turns it off.
 - **`--exec-version` is opt-in.** It runs `node --version` on binaries named in pm2 entries, crontabs and units only when root (or you, when you are not root) owns the file and every directory from `/` down to it, none of them is writable by group or others, and the file has one link; it executes the pinned file through `/proc/self/fd/N`. As root it refuses any binary not owned by root.
@@ -75,6 +75,8 @@ Everything the script finds can come from someone else: binaries, unit files, co
 - System crontabs (`/etc/crontab`, `/etc/cron.d`, `/etc/cron.daily`) and the saved pm2 list (`dump.pm2`) are not read. Check them with `grep` (the post has the command).
 - A bare `node` in a cron job or unit is not resolved through that job's `PATH`; only absolute paths and `PATH=` lines are checked.
 - A Node binary renamed to something other than `node` or `nodejs` (single executable applications, Electron) is not detected as a process.
+- Symlinked unit files are skipped; an enabled unit's real file is read from its own directory, but a unit linked in from elsewhere (`systemctl link`) is not.
+- Container and `--exec-version` results come from `node --version`, which does not show whether a distribution build links a system Brotli.
 - Kubernetes is not covered. Stopped containers and images that are not running are not covered. In a container, `node --version` reports the `node` on the container's `PATH`, not necessarily every Node in the image.
 
 MIT licensed.
