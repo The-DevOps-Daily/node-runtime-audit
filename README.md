@@ -43,6 +43,7 @@ for h in web1 web2; do ssh "$h" 'sudo python3 - --json' < node_runtime_audit.py 
 - `registry_scan.py`: which official `node` image tags ship a fixed Node, read from registry metadata only (manifest and config by digest, no layers). `scripts/summarize_registry.py` turns a scan into hours after the release.
 - `lab/pm2-pin-lab.sh OLD_BIN NEW_BIN`: starts four pm2 apps (bare `node`, `npm start`, an absolute `--interpreter`, cluster mode) in a throwaway `PM2_HOME` on the old Node, switches `PATH` to the new one and records which binary each process really runs after `restart`, `restart --update-env`, delete and recreate, and `pm2 update`.
 - `scripts/record-run.sh`: records a redacted run under `examples/`.
+- `scripts/pgrep-vs-proc.sh`: compares `pgrep node` with the processes whose real binary is `node`.
 - `tests/`: `python3 -m unittest discover -s tests -v`. Fake hosts with the cases a version check gets wrong: a deleted binary still running, a container binary, a distribution build, a pm2 entry whose config is fixed but whose process was never restarted, `npm` pinned to the old install while its child gets the new one, end-of-life and pre-release versions, cron jobs on a removed version.
 
 ## Results
@@ -50,6 +51,7 @@ for h in web1 web2; do ssh "$h" 'sudo python3 - --json' < node_runtime_audit.py 
 - `results/pm2-lab-20261022T063002Z.txt`: pm2 6.0.14 with Node v24.14.0 and v24.22.1.
 - `examples/run-20261022T062905Z.txt`: the script on our Raspberry Pi.
 - `results/registry-20261022T062338Z.json`: 24 official tags, amd64 and arm64.
+- `results/pgrep-vs-proc-20261022T063334Z.txt`: `pgrep -c node` returns 0 on the Pi while five processes run a `node` binary.
 
 Facts and their sources are in [SOURCES.md](SOURCES.md).
 

@@ -1,0 +1,12 @@
+# 2026-10-22T06:33:34Z aarch64
+$ pgrep -c node
+0
+$ pgrep -c -x node
+0
+# processes whose /proc/<pid>/exe is a node binary, with the name ps and pgrep see
+PID      COMM             EXE
+1883303  PM2 v6.0.14: Go  /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
+1883371  MainThread       /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
+1883390  next-server (v1  /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
+1884634  MainThread       /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
+1941135  MainThread       /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node
