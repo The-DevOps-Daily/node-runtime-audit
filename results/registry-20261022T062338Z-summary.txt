@@ -1,0 +1,14 @@
+scan 2026-10-22T06:23:38Z to 2026-10-22T06:24:54Z UTC; reference: fixed binaries on nodejs.org/dist by 2026-10-21 10:36 UTC
+family   platform     rows   built (h after)        hub last pushed (h after)
+alpine   linux/amd64  6      12.4 to 12.4           13.0 to 13.1
+alpine   linux/arm64  6      13.3 to 13.5           16.0 to 16.1
+debian   linux/amd64  12     1.0 to 1.0             4.0 to 4.1
+debian   linux/arm64  12     1.0 to 1.0             4.0 to 4.1
+vulnerable (no fixed release for the line):
+  node:18         18.20.8  built 2025-03-27
+  node:18-alpine  18.20.8  built 2025-03-27
+  node:20         20.20.2  built 2026-04-22
+  node:20-alpine  20.20.2  built 2026-04-15
+  node:25         25.9.0   built 2026-05-20
+  node:25-alpine  25.9.0   built 2026-04-15
+unknown: 0

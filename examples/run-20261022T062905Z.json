@@ -1,0 +1,294 @@
+{
+  "release": "Node.js security release of 2026-10-21",
+  "fixed": {
+    "22": "v22.23.4",
+    "24": "v24.22.1",
+    "26": "v26.12.1"
+  },
+  "notes": [
+    "not root: only your own processes, crontab and pm2 are fully visible"
+  ],
+  "processes": [
+    {
+      "pid": 1883303,
+      "ppid": 1,
+      "user": "USER",
+      "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+      "deleted": false,
+      "container": false,
+      "version": "v24.14.0",
+      "method": "embedded+--version",
+      "status": "vulnerable",
+      "reason": "v24.14.0 < v24.22.1",
+      "notes": [],
+      "cmd": "PM2 v6.0.14: God Daemon (/home/USER/.pm2)",
+      "parents": [
+        "systemd(1)"
+      ]
+    },
+    {
+      "pid": 1883371,
+      "ppid": 1883370,
+      "user": "USER",
+      "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+      "deleted": false,
+      "container": false,
+      "version": "v24.14.0",
+      "method": "embedded+--version",
+      "status": "vulnerable",
+      "reason": "v24.14.0 < v24.22.1",
+      "notes": [],
+      "cmd": "node /home/USER/projects/app-1/node_modules/.bin/next dev",
+      "parents": [
+        "bun(1883370)",
+        "node(1883303)",
+        "systemd(1)"
+      ]
+    },
+    {
+      "pid": 1883390,
+      "ppid": 1883371,
+      "user": "USER",
+      "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+      "deleted": false,
+      "container": false,
+      "version": "v24.14.0",
+      "method": "embedded+--version",
+      "status": "vulnerable",
+      "reason": "v24.14.0 < v24.22.1",
+      "notes": [],
+      "cmd": "next-server (v16.2.6)",
+      "parents": [
+        "node(1883371)",
+        "bun(1883370)",
+        "node(1883303)",
+        "systemd(1)"
+      ]
+    },
+    {
+      "pid": 1884634,
+      "ppid": 1883390,
+      "user": "USER",
+      "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+      "deleted": false,
+      "container": false,
+      "version": "v24.14.0",
+      "method": "embedded+--version",
+      "status": "vulnerable",
+      "reason": "v24.14.0 < v24.22.1",
+      "notes": [],
+      "cmd": "node /home/USER/projects/app-1/.next/dev/build/postcss.js 38963",
+      "parents": [
+        "node(1883390)",
+        "node(1883371)",
+        "bun(1883370)",
+        "node(1883303)"
+      ]
+    }
+  ],
+  "hidden": 178,
+  "pm2": [
+    {
+      "kind": "live list",
+      "source": "pm2 jlist, PM2_HOME=/home/USER/.pm2",
+      "error": null,
+      "daemon": {
+        "pid": 1883303,
+        "ppid": 1,
+        "user": "USER",
+        "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+        "deleted": false,
+        "container": false,
+        "version": "v24.14.0",
+        "method": "embedded+--version",
+        "status": "vulnerable",
+        "reason": "v24.14.0 < v24.22.1",
+        "notes": [],
+        "cmd": "PM2 v6.0.14: God Daemon (/home/USER/.pm2)",
+        "parents": [
+          "systemd(1)"
+        ]
+      },
+      "entries": [
+        {
+          "name": "app-1",
+          "status_pm2": "online",
+          "pid": 1883370,
+          "interpreter": "none",
+          "script": "/home/USER/.bun/bin/bun",
+          "findings": [
+            {
+              "path": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin",
+              "node": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+              "pinned": true,
+              "version": "v24.14.0",
+              "status": "vulnerable",
+              "reason": "v24.14.0 < v24.22.1",
+              "what": "PATH node"
+            }
+          ],
+          "running": [
+            {
+              "pid": 1883371,
+              "ppid": 1883370,
+              "user": "USER",
+              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+              "deleted": false,
+              "container": false,
+              "version": "v24.14.0",
+              "method": "embedded+--version",
+              "status": "vulnerable",
+              "reason": "v24.14.0 < v24.22.1",
+              "notes": [],
+              "cmd": "node /home/USER/projects/app-1/node_modules/.bin/next dev",
+              "parents": [
+                "bun(1883370)",
+                "node(1883303)",
+                "systemd(1)"
+              ]
+            },
+            {
+              "pid": 1883390,
+              "ppid": 1883371,
+              "user": "USER",
+              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+              "deleted": false,
+              "container": false,
+              "version": "v24.14.0",
+              "method": "embedded+--version",
+              "status": "vulnerable",
+              "reason": "v24.14.0 < v24.22.1",
+              "notes": [],
+              "cmd": "next-server (v16.2.6)",
+              "parents": [
+                "node(1883371)",
+                "bun(1883370)",
+                "node(1883303)",
+                "systemd(1)"
+              ]
+            },
+            {
+              "pid": 1884634,
+              "ppid": 1883390,
+              "user": "USER",
+              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+              "deleted": false,
+              "container": false,
+              "version": "v24.14.0",
+              "method": "embedded+--version",
+              "status": "vulnerable",
+              "reason": "v24.14.0 < v24.22.1",
+              "notes": [],
+              "cmd": "node /home/USER/projects/app-1/.next/dev/build/postcss.js 38963",
+              "parents": [
+                "node(1883390)",
+                "node(1883371)",
+                "bun(1883370)",
+                "node(1883303)"
+              ]
+            }
+          ],
+          "status": "vulnerable"
+        }
+      ]
+    },
+    {
+      "kind": "saved list",
+      "source": "/home/USER/.pm2/dump.pm2, what a reboot or pm2 resurrect starts",
+      "entries": [
+        {
+          "name": "app-1",
+          "status_pm2": "online",
+          "pid": null,
+          "interpreter": "none",
+          "script": "/home/USER/.bun/bin/bun",
+          "findings": [
+            {
+              "path": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin",
+              "node": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
+              "pinned": true,
+              "version": "v24.14.0",
+              "status": "vulnerable",
+              "reason": "v24.14.0 < v24.22.1",
+              "what": "PATH node"
+            }
+          ],
+          "running": [],
+          "status": "vulnerable"
+        }
+      ]
+    }
+  ],
+  "containers": {
+    "error": "no docker or podman CLI found",
+    "items": []
+  },
+  "installs": {
+    "managers": [
+      {
+        "manager": "fnm",
+        "where": "/home/USER/.local/share/fnm",
+        "versions": [
+          {
+            "version": "v24.14.0",
+            "status": "vulnerable"
+          },
+          {
+            "version": "v24.14.1",
+            "status": "vulnerable"
+          },
+          {
+            "version": "v24.22.1",
+            "status": "patched"
+          }
+        ],
+        "default": "v24.22.1",
+        "default_status": "patched"
+      }
+    ],
+    "shell": {
+      "path": "/run/user/UID/fnm_multishells/2111_1791366850230/bin/node",
+      "real": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "version": "v24.22.1",
+      "status": "patched"
+    }
+  },
+  "cron": [
+    {
+      "path": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "pinned": true,
+      "version": "v24.22.1",
+      "status": "patched",
+      "reason": "v24.22.1 >= v24.22.1",
+      "where": "crontab -l (USER):33"
+    },
+    {
+      "path": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "pinned": true,
+      "version": "v24.22.1",
+      "status": "patched",
+      "reason": "v24.22.1 >= v24.22.1",
+      "where": "crontab -l (USER):53"
+    }
+  ],
+  "systemd": [
+    {
+      "path": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin",
+      "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
+      "pinned": true,
+      "version": "v24.22.1",
+      "status": "patched",
+      "reason": "v24.22.1 >= v24.22.1",
+      "where": "/etc/systemd/system/pm2-USER.service:12",
+      "unit_state": {
+        "unit": "pm2-USER.service",
+        "active": "inactive",
+        "main_pid": "0"
+      }
+    }
+  ],
+  "exit": 1,
+  "result": "VULNERABLE: something runs or will start an unfixed Node"
+}

@@ -1,0 +1,117 @@
+# pm2-pin-lab 2026-10-22T06:30:02Z aarch64
+# old: v24.14.0  new: v24.22.1  pm2: 6.0.14
+# app: a script that sleeps; package.json start script: node server.js
+
+## A. Before the upgrade: the old Node is first in PATH
+$ pm2 start server.js --name bare
+$ pm2 start npm --name via-npm -- start
+$ pm2 start server.js --name abs --interpreter /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
+$ pm2 start server.js --name clustered -i 1
+
+== A. started from the old shell
+daemon     pid 1937570 node v24.14.0   <v24.14.0>/bin/node
+bare       interpreter=node  script=<app>/server.js
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937582 node v24.14.0    <v24.14.0>/bin/node                          server.js
+via-npm    interpreter=<v24.14.0>/bin/node  script=<v24.14.0>/bin/npm
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937608 node v24.14.0    <v24.14.0>/bin/node                          npm start
+    pid 1937678 dash (not node)  /usr/bin/dash                                sh -c node server.js
+      pid 1937679 node v24.14.0    <v24.14.0>/bin/node                          node server.js
+abs        interpreter=<v24.14.0>/bin/node  script=<app>/server.js
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937634 node v24.14.0    <v24.14.0>/bin/node                          server.js
+clustered  interpreter=node  script=<app>/server.js  (cluster mode)
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937672 node v24.14.0    <v24.14.0>/bin/node                          server.js
+
+## B. The upgrade: the new Node is now first in PATH (nvm/fnm default changed)
+$ pm2 restart bare
+$ pm2 restart via-npm
+$ pm2 restart abs
+$ pm2 restart clustered
+
+== B1. pm2 restart from the new shell
+daemon     pid 1937570 node v24.14.0   <v24.14.0>/bin/node
+bare       interpreter=node  script=<app>/server.js
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937760 node v24.14.0    <v24.14.0>/bin/node                          server.js
+via-npm    interpreter=<v24.14.0>/bin/node  script=<v24.14.0>/bin/npm
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937785 node v24.14.0    <v24.14.0>/bin/node                          npm start
+    pid 1937812 dash (not node)  /usr/bin/dash                                sh -c node server.js
+      pid 1937813 node v24.14.0    <v24.14.0>/bin/node                          node server.js
+abs        interpreter=<v24.14.0>/bin/node  script=<app>/server.js
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937820 node v24.14.0    <v24.14.0>/bin/node                          server.js
+clustered  interpreter=node  script=<app>/server.js  (cluster mode)
+           saved PATH finds node in <v24.14.0>/bin
+  pid 1937843 node v24.14.0    <v24.14.0>/bin/node                          server.js
+
+$ pm2 restart bare --update-env
+$ pm2 restart via-npm --update-env
+$ pm2 restart abs --update-env
+$ pm2 restart clustered --update-env
+
+== B2. pm2 restart --update-env from the new shell
+daemon     pid 1937570 node v24.14.0   <v24.14.0>/bin/node
+bare       interpreter=node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938284 node v24.22.1    <v24.22.1>/bin/node                          server.js
+via-npm    interpreter=<v24.14.0>/bin/node  script=<v24.14.0>/bin/npm
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938375 node v24.14.0    <v24.14.0>/bin/node                          npm start
+    pid 1938462 dash (not node)  /usr/bin/dash                                sh -c node server.js
+      pid 1938468 node v24.22.1    <v24.22.1>/bin/node                          node server.js
+abs        interpreter=<v24.14.0>/bin/node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938455 node v24.14.0    <v24.14.0>/bin/node                          server.js
+clustered  interpreter=node  script=<app>/server.js  (cluster mode)
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938518 node v24.14.0    <v24.14.0>/bin/node                          server.js
+
+$ pm2 delete via-npm
+$ pm2 delete abs
+$ pm2 start npm --name via-npm -- start
+$ pm2 start server.js --name abs --interpreter /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node
+
+== B3. via-npm and abs deleted and recreated from the new shell
+daemon     pid 1937570 node v24.14.0   <v24.14.0>/bin/node
+bare       interpreter=node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938284 node v24.22.1    <v24.22.1>/bin/node                          server.js
+clustered  interpreter=node  script=<app>/server.js  (cluster mode)
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938518 node v24.14.0    <v24.14.0>/bin/node                          server.js
+via-npm    interpreter=<v24.22.1>/bin/node  script=<v24.22.1>/bin/npm
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938835 node v24.22.1    <v24.22.1>/bin/node                          npm start
+    pid 1938881 dash (not node)  /usr/bin/dash                                sh -c node server.js
+      pid 1938882 node v24.22.1    <v24.22.1>/bin/node                          node server.js
+abs        interpreter=<v24.22.1>/bin/node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1938857 node v24.22.1    <v24.22.1>/bin/node                          server.js
+
+## C. The daemon itself
+$ pm2 update
+app pids before pm2 update: bare=1938284 clustered=1938518 via-npm=1938835 abs=1938857
+app pids after pm2 update:  bare=1939274 clustered=1939273 via-npm=1939286 abs=1939301
+pm2 update took 2.3 s
+
+== C. after pm2 update from the new shell
+daemon     pid 1939245 node v24.22.1   <v24.22.1>/bin/node
+bare       interpreter=node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1939274 node v24.22.1    <v24.22.1>/bin/node                          server.js
+clustered  interpreter=node  script=<app>/server.js  (cluster mode)
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1939273 node v24.22.1    <v24.22.1>/bin/node                          server.js
+via-npm    interpreter=<v24.22.1>/bin/node  script=<v24.22.1>/bin/npm
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1939286 node v24.22.1    <v24.22.1>/bin/node                          npm start
+    pid 1939381 dash (not node)  /usr/bin/dash                                sh -c node server.js
+      pid 1939382 node v24.22.1    <v24.22.1>/bin/node                          node server.js
+abs        interpreter=<v24.22.1>/bin/node  script=<app>/server.js
+           saved PATH finds node in <v24.22.1>/bin
+  pid 1939301 node v24.22.1    <v24.22.1>/bin/node                          server.js
+

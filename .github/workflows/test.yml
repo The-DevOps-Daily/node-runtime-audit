@@ -1,0 +1,26 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tests -v
+      - name: run against the runner itself (any verdict is fine, a crash is not)
+        run: |
+          set +e
+          python node_runtime_audit.py --no-containers > out.txt
+          code=$?
+          cat out.txt
+          grep -q '^result:' out.txt && test "$code" -le 2

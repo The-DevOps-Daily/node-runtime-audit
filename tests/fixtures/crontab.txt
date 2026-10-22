@@ -1,0 +1,8 @@
+SHELL=/bin/bash
+PATH={ROOT}/nvm/versions/node/v24.14.0/bin:/usr/local/bin:/usr/bin:/bin
+# 0 1 * * * {ROOT}/nvm/versions/node/v22.1.0/bin/node /srv/commented-out.js
+15 3 * * * {ROOT}/nvm/versions/node/v24.22.1/bin/node /srv/report.mjs >> /tmp/report.log 2>&1
+30 3 * * * cd /srv/app && {ROOT}/nvm/versions/node/v24.14.0/bin/npx tsx jobs/sync.ts
+45 3 * * * {ROOT}/nvm/versions/node/v20.11.0/bin/node /srv/removed-version.js
+0 4 * * * curl -s https://example.com/bin/node/latest -o /dev/null
+0 5 * * * TOKEN=secret-value {ROOT}/nvm/versions/node/v24.22.1/bin/node /srv/a.js; {ROOT}/nvm/versions/node/v24.22.1/bin/node /srv/b.js

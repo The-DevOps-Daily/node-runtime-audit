@@ -1,0 +1,92 @@
+[
+  {
+    "name": "api",
+    "pid": 200,
+    "pm2_env": {
+      "name": "api",
+      "status": "online",
+      "exec_interpreter": "{ROOT}/nvm/versions/node/v24.14.0/bin/node",
+      "pm_exec_path": "/srv/api/server.js",
+      "PATH": "{ROOT}/nvm/versions/node/v24.22.1/bin:/usr/bin:/bin",
+      "env": {"API_TOKEN": "do-not-print-me"}
+    }
+  },
+  {
+    "name": "web",
+    "pid": 210,
+    "pm2_env": {
+      "name": "web",
+      "status": "online",
+      "exec_interpreter": "none",
+      "pm_exec_path": "{ROOT}/nvm/versions/node/v24.14.0/bin/npm",
+      "PATH": "{ROOT}/nvm/versions/node/v24.22.1/bin:/usr/bin:/bin"
+    }
+  },
+  {
+    "name": "worker",
+    "pid": 220,
+    "pm2_env": {
+      "name": "worker",
+      "status": "online",
+      "exec_interpreter": "node",
+      "pm_exec_path": "/srv/worker/index.js",
+      "PATH": "{ROOT}/missing/bin:{ROOT}/fnm/node-versions/v24.14.0/installation/bin:/usr/bin"
+    }
+  },
+  {
+    "name": "fresh",
+    "pid": 230,
+    "pm2_env": {
+      "name": "fresh",
+      "status": "online",
+      "exec_interpreter": "node",
+      "pm_exec_path": "/srv/fresh/index.js",
+      "PATH": "{ROOT}/nvm/versions/node/v24.22.1/bin:/usr/bin"
+    }
+  },
+  {
+    "name": "stale-config",
+    "pid": 240,
+    "pm2_env": {
+      "name": "stale-config",
+      "status": "online",
+      "exec_interpreter": "node",
+      "pm_exec_path": "/srv/stale/index.js",
+      "PATH": "{ROOT}/nvm/versions/node/v24.22.1/bin:/usr/bin"
+    }
+  },
+  {
+    "name": "py-job",
+    "pid": 250,
+    "pm2_env": {
+      "name": "py-job",
+      "status": "online",
+      "exec_interpreter": "python3",
+      "pm_exec_path": "/srv/job/run.py",
+      "PATH": "{ROOT}/nvm/versions/node/v24.14.0/bin:/usr/bin"
+    }
+  },
+  {
+    "name": "clustered",
+    "pid": 260,
+    "pm2_env": {
+      "name": "clustered",
+      "status": "online",
+      "exec_mode": "cluster_mode",
+      "exec_interpreter": "node",
+      "pm_exec_path": "/srv/clustered/index.js",
+      "PATH": "{ROOT}/nvm/versions/node/v24.22.1/bin:/usr/bin"
+    }
+  },
+  {
+    "name": "no-node",
+    "pid": 0,
+    "pm2_env": {
+      "name": "no-node",
+      "status": "stopped",
+      "exec_interpreter": "node",
+      "pm_exec_path": "/srv/x/index.js",
+      "PATH": "{ROOT}/missing/bin"
+    }
+  }
+]
