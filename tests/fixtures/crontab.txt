@@ -6,3 +6,4 @@ PATH={ROOT}/nvm/versions/node/v24.14.0/bin:/usr/local/bin:/usr/bin:/bin
 45 3 * * * {ROOT}/nvm/versions/node/v20.11.0/bin/node /srv/removed-version.js
 0 4 * * * curl -s https://example.com/bin/node/latest -o /dev/null
 0 5 * * * TOKEN=secret-value {ROOT}/nvm/versions/node/v24.22.1/bin/node /srv/a.js; {ROOT}/nvm/versions/node/v24.22.1/bin/node /srv/b.js
+0 6 * * * {ROOT}/nvm/versions/node/v24.22.1/bin/npx tsx jobs/x.ts

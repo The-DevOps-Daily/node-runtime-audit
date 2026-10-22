@@ -6,7 +6,7 @@
     "26": "v26.12.1"
   },
   "notes": [
-    "not root: only your own processes, crontab and pm2 are fully visible"
+    "covers the processes, crontab and pm2 of USER; run it as each user that owns Node processes"
   ],
   "processes": [
     {
@@ -86,12 +86,12 @@
       ]
     }
   ],
-  "hidden": 178,
+  "hidden": 177,
   "pm2": [
     {
       "kind": "live list",
       "source": "pm2 jlist, PM2_HOME=/home/USER/.pm2",
-      "error": null,
+      "error": "FAIL: pm2 CLI /home/USER/.bun/bin/pm2 is writable by group or others (mode 777): not run, live list skipped",
       "daemon": {
         "pid": 1883303,
         "ppid": 1,
@@ -109,93 +109,15 @@
           "systemd(1)"
         ]
       },
-      "entries": [
-        {
-          "name": "app-1",
-          "status_pm2": "online",
-          "pid": 1883370,
-          "cluster": false,
-          "interpreter": "none",
-          "script": "/home/USER/.bun/bin/bun",
-          "findings": [
-            {
-              "path": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin",
-              "node": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
-              "pinned": true,
-              "version": "v24.14.0",
-              "status": "vulnerable",
-              "reason": "v24.14.0 < v24.22.1",
-              "what": "PATH node"
-            }
-          ],
-          "running": [
-            {
-              "pid": 1883371,
-              "ppid": 1883370,
-              "user": "USER",
-              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
-              "deleted": false,
-              "container": false,
-              "version": "v24.14.0",
-              "method": "embedded",
-              "status": "vulnerable",
-              "reason": "v24.14.0 < v24.22.1",
-              "notes": [],
-              "cmd": "node /home/USER/projects/app-1/node_modules/.bin/next dev",
-              "parents": [
-                "bun(1883370)",
-                "node(1883303)",
-                "systemd(1)"
-              ]
-            },
-            {
-              "pid": 1883390,
-              "ppid": 1883371,
-              "user": "USER",
-              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
-              "deleted": false,
-              "container": false,
-              "version": "v24.14.0",
-              "method": "embedded",
-              "status": "vulnerable",
-              "reason": "v24.14.0 < v24.22.1",
-              "notes": [],
-              "cmd": "next-server (v16.2.6)",
-              "parents": [
-                "node(1883371)",
-                "bun(1883370)",
-                "node(1883303)",
-                "systemd(1)"
-              ]
-            },
-            {
-              "pid": 1884634,
-              "ppid": 1883390,
-              "user": "USER",
-              "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
-              "deleted": false,
-              "container": false,
-              "version": "v24.14.0",
-              "method": "embedded",
-              "status": "vulnerable",
-              "reason": "v24.14.0 < v24.22.1",
-              "notes": [],
-              "cmd": "node /home/USER/projects/app-1/.next/dev/build/postcss.js 38963",
-              "parents": [
-                "node(1883390)",
-                "node(1883371)",
-                "bun(1883370)",
-                "node(1883303)"
-              ]
-            }
-          ],
-          "status": "vulnerable"
-        }
-      ]
+      "error_status": "unknown",
+      "error_text": "pm2 CLI /home/USER/.bun/bin/pm2 is writable by group or others (mode 777): not run, live list skipped",
+      "entries": []
     },
     {
       "kind": "saved list",
       "source": "/home/USER/.pm2/dump.pm2, what a reboot or pm2 resurrect starts",
+      "error": null,
+      "error_status": null,
       "entries": [
         {
           "name": "app-1",
@@ -223,6 +145,7 @@
   ],
   "containers": {
     "error": "no docker or podman CLI found",
+    "errors": [],
     "items": []
   },
   "installs": {
@@ -245,14 +168,16 @@
           }
         ],
         "default": "v24.22.1",
-        "default_status": "patched"
+        "default_status": "patched",
+        "default_reason": "v24.22.1 >= v24.22.1"
       }
     ],
     "shell": {
       "path": "/run/user/UID/fnm_multishells/2111_1791366850230/bin/node",
       "real": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
       "version": "v24.22.1",
-      "status": "patched"
+      "status": "patched",
+      "reason": "v24.22.1 >= v24.22.1"
     }
   },
   "cron": [

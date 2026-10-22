@@ -4,6 +4,7 @@ Description=API
 [Service]
 User=app
 Environment=NODE_ENV=production
+EnvironmentFile=-{ROOT}/etc/default/api
 ; ExecStart={ROOT}/nvm/versions/node/v18.0.0/bin/node /srv/old.js
 ExecStart={ROOT}/usr/bin/node /srv/api/server.js
 Restart=always

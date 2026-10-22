@@ -23,10 +23,10 @@ import argparse
 import errno
 import glob
 import json
-import mmap
 import os
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -79,45 +79,43 @@ def clean_tree(obj):
 
 # ---------------------------------------------------------------- safe reads
 
-MAX_READ = 4 << 20  # config files, unit files, scripts
+MAX_READ = 4 << 20       # config files, unit files, scripts
+MAX_BINARY = 512 << 20   # Node binaries are about 100 to 130 MB
 
 
-def safe_open(path, follow_magic=False):
-    """Open a file someone else may control without blocking on it.
+def open_pinned(path, follow=True, allow_unlinked=False):
+    """Open a file someone else may control, for reading, without blocking.
 
-    Symlinks are resolved first and the real path is opened with O_NOFOLLOW,
-    O_NONBLOCK and O_CLOEXEC, after an lstat that must show a regular file;
-    fstat must then show the same regular file. A FIFO, socket or device
-    planted where a file is expected is refused instead of stalling the
-    audit. follow_magic is for /proc/<pid>/exe, a kernel link that has to be
-    followed; it is still opened non-blocking and must be a regular file.
+    The path is first opened with O_PATH, which never runs a device's open
+    and never blocks on a FIFO. fstat on that handle must show a regular file
+    with exactly one link (or none, for a deleted binary seen through
+    /proc/<pid>/exe, when allow_unlinked). Only then is the same inode
+    reopened for reading through /proc/self/fd/N with O_RDONLY, O_NONBLOCK
+    and O_CLOEXEC, so nothing can be swapped in between. follow=False adds
+    O_NOFOLLOW: a symlink as the last path component is refused.
     Returns (fd, stat)."""
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
-    if follow_magic:
-        fd = os.open(path, flags)
-        expect = None
-    else:
-        real = os.path.realpath(path)
-        lst = os.lstat(real)
-        if not stat.S_ISREG(lst.st_mode):
-            raise OSError(errno.EINVAL, "not a regular file", path)
-        fd = os.open(real, flags | os.O_NOFOLLOW)
-        expect = (lst.st_dev, lst.st_ino)
+    pfd = os.open(path, os.O_PATH | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW))
     try:
-        st = os.fstat(fd)
+        st = os.fstat(pfd)
+        if stat.S_ISLNK(st.st_mode):
+            raise OSError(errno.ELOOP, "is a symlink", path)
         if not stat.S_ISREG(st.st_mode):
             raise OSError(errno.EINVAL, "not a regular file", path)
-        if expect and (st.st_dev, st.st_ino) != expect:
-            raise OSError(errno.EAGAIN, "file changed while opening", path)
-    except OSError:
+        if st.st_nlink != 1 and not (allow_unlinked and st.st_nlink == 0):
+            raise OSError(errno.EMLINK, "has %d hard links" % st.st_nlink, path)
+        fd = os.open("/proc/self/fd/%d" % pfd, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    finally:
+        os.close(pfd)
+    st2 = os.fstat(fd)
+    if (st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino):
         os.close(fd)
-        raise
-    return fd, st
+        raise OSError(errno.EAGAIN, "file changed while opening", path)
+    return fd, st2
 
 
 def safe_read(path, limit=MAX_READ, binary=False):
-    """Read at most `limit` bytes of a regular file (see safe_open)."""
-    fd, _ = safe_open(path)
+    """Read at most `limit` bytes of a regular, singly linked file."""
+    fd, _ = open_pinned(path)
     try:
         chunks, size = [], 0
         while size < limit:
@@ -144,7 +142,10 @@ def parse_fixed(spec):
         m = VERSION_RE.match(ver.strip())
         if not line.strip().isdigit() or not m or m.group(4):
             raise ValueError("bad --fixed entry %r (want 24=24.22.1)" % part)
-        fixed[int(line)] = tuple(int(x) for x in m.groups()[:3])
+        v = tuple(int(x) for x in m.groups()[:3])
+        if int(line) != v[0]:
+            raise ValueError("bad --fixed entry %r: the version is not on line %s" % (part, line))
+        fixed[int(line)] = v
     if not fixed:
         raise ValueError("--fixed is empty")
     return fixed
@@ -190,124 +191,104 @@ def pinned_version(path):
 
 # ---------------------------------------------------------------- binaries
 
-HEADER_RE = re.compile(r"^#define\s+NODE_(MAJOR|MINOR|PATCH)_VERSION\s+(\d+)\s*$", re.M)
-IS_RELEASE_RE = re.compile(r"^#define\s+NODE_VERSION_IS_RELEASE\s+(\d+)\s*$", re.M)
-
-
 class BinaryInspector:
     """Reads the version of a Node binary without running it.
 
-    1. embedded: the headers URL compiled into official builds, read from the
-       file itself. For processes the file is opened through /proc/<pid>/exe,
-       which is the inode the process runs, even when it was deleted or lives
-       in a container.
-    2. node_version.h: include/node/node_version.h of the install the binary
-       sits in, used only when the binary carries no embedded string.
-    3. --version: only with --exec-version, through exec_version_hardened().
-
-    A version that only a directory name gives is a hint and stays unknown.
+    The only source is the binary itself: official builds compile in their
+    headers URL (node-vX.Y.Z-headers.tar.gz). For a process the file is opened
+    through /proc/<pid>/exe, the inode the process runs, even when it was
+    deleted or lives in a container. A version that only a directory name
+    gives ("from path") is a hint and never counts as patched. --exec-version
+    adds a `--version` cross-check through exec_version_hardened().
     """
 
     def __init__(self, exec_version=False):
         self.exec_version = exec_version
         self.cache = {}
 
-    def inspect(self, path, install_path=None, exec_path=None, magic=False):
-        """path: the file to read; magic=True for /proc/<pid>/exe.
-        install_path: the binary's path in its install, for node_version.h
-        (None to skip). exec_path: the file to run with --exec-version."""
+    def inspect(self, path, exec_path=None, magic=False):
+        """path: the file to read. magic=True for /proc/<pid>/exe, which has to
+        be followed; any other path is opened with O_NOFOLLOW. exec_path: the
+        file to run with --exec-version."""
         try:
-            st = os.stat(path)
+            fd, st = open_pinned(path, follow=magic, allow_unlinked=magic)
         except OSError as e:
-            return {"version": None, "method": None, "error": e.strerror, "shared": []}
-        key = (st.st_dev, st.st_ino, install_path, bool(exec_path and self.exec_version))
-        if key not in self.cache:
-            self.cache[key] = self._inspect(path, install_path, exec_path, magic)
+            return {"version": None, "method": None, "shared": [],
+                    "error": "cannot read the binary: %s" % (e.strerror or e)}
+        key = (st.st_dev, st.st_ino, bool(exec_path and self.exec_version))
+        try:
+            if key not in self.cache:
+                self.cache[key] = self._inspect(fd, st, exec_path)
+        finally:
+            os.close(fd)
         return self.cache[key]
 
-    def _inspect(self, path, install_path, exec_path, magic):
+    def _inspect(self, fd, st, exec_path):
         info = {"version": None, "method": None, "error": None, "shared": []}
         embedded = set()
-        expect, owner = None, None
+        if st.st_size > MAX_BINARY:
+            info["error"] = "file larger than %d MB, not read" % (MAX_BINARY >> 20)
+            return info
         try:
-            fd, st = safe_open(path, follow_magic=magic)
-            expect, owner = (st.st_dev, st.st_ino), st.st_uid
-            try:
-                if st.st_size:
-                    with mmap.mmap(fd, 0, access=mmap.ACCESS_READ) as mm:
-                        for m in EMBEDDED_RE.finditer(mm):
-                            embedded.add("v" + m.group(1).decode())
-                        for lib in (b"libnode.so", b"libbrotlidec.so"):
-                            if mm.find(lib) != -1:
-                                info["shared"].append(lib.decode())
-            finally:
-                os.close(fd)
+            # pread in chunks with an overlap, not mmap: a file truncated
+            # while we read it ends the loop instead of raising SIGBUS.
+            pos, tail, shared = 0, b"", set()
+            while pos < st.st_size:
+                chunk = os.pread(fd, min(1 << 20, st.st_size - pos), pos)
+                if not chunk:
+                    break
+                buf = tail + chunk
+                for m in EMBEDDED_RE.finditer(buf):
+                    embedded.add("v" + m.group(1).decode())
+                for lib in (b"libnode.so", b"libbrotlidec.so"):
+                    if lib in buf:
+                        shared.add(lib.decode())
+                tail = buf[-256:]
+                pos += len(chunk)
+            info["shared"] = sorted(shared)
         except (OSError, ValueError) as e:
             info["error"] = getattr(e, "strerror", None) or str(e)
             return info
-        found, method = None, None
         if len(embedded) > 1:
             info["error"] = "several versions embedded: %s" % ", ".join(sorted(embedded))
             return info
-        if embedded:
-            found, method = embedded.pop(), "embedded"
-        elif install_path:
-            found, why = header_version(install_path, owner)
-            method = "node_version.h" if found else None
-            if why:
-                info["header_refused"] = why
+        found = embedded.pop() if embedded else None
         executed = None
         if exec_path and self.exec_version:
-            executed, why = exec_version_hardened(exec_path, expect)
+            executed, why = exec_version_hardened(exec_path, (st.st_dev, st.st_ino))
             if executed is None:
                 info["exec_refused"] = why
         if found and executed and found != executed:
-            info["error"] = "%s says %s but --version says %s" % (method, found, executed)
+            info["error"] = "embedded %s but --version says %s" % (found, executed)
             return info
         if found:
-            info["version"], info["method"] = found, method + ("+--version" if executed else "")
+            info["version"], info["method"] = found, "embedded" + ("+--version" if executed else "")
         elif executed:
             info["version"], info["method"] = executed, "--version"
         return info
 
 
-def header_version(binary_path, binary_owner):
-    """Version from include/node/node_version.h next to bin/node, only when
-    the header is a regular file with the binary's owner that nobody else can
-    write. Returns (version or None, reason it was refused or None)."""
-    root = os.path.dirname(os.path.dirname(binary_path))
-    header = os.path.join(root, "include", "node", "node_version.h")
-    if not os.path.lexists(header):
-        return None, None
-    try:
-        fd, st = safe_open(header)
-    except OSError as e:
-        return None, "node_version.h refused: %s" % (e.strerror or e)
-    try:
-        if st.st_uid != binary_owner or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            return None, "node_version.h refused: other owner than the binary, or writable by others"
-        text = os.read(fd, 65536).decode("utf-8", "replace")
-    finally:
-        os.close(fd)
-    parts = dict(HEADER_RE.findall(text))
-    if not all(k in parts for k in ("MAJOR", "MINOR", "PATCH")):
-        return None, None
-    v = "v%s.%s.%s" % (parts["MAJOR"], parts["MINOR"], parts["PATCH"])
-    rel = IS_RELEASE_RE.search(text)
-    return (v + "-pre" if rel and rel.group(1) == "0" else v), None
-
-
 def trusted_owner_ok(st, me):
     """Root, or us when we are not root; never writable by group or others."""
+    return not untrusted_reason(st, me)
+
+
+def untrusted_reason(st, me):
+    """Why a file or directory could have been changed by someone else, or ''."""
     owners = {0} if me == 0 else {0, me}
-    return st.st_uid in owners and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    if st.st_uid not in owners:
+        return "owned by uid %d" % st.st_uid
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "writable by group or others (mode %o)" % stat.S_IMODE(st.st_mode)
+    return ""
 
 
 def exec_version_hardened(path, expect=None, timeout=10):
     """Run `<node> --version` only when nobody but root (or us, when not root)
     can have changed the file or any directory above it. The file is pinned
-    with an O_PATH descriptor and executed through /proc/self/fd/N, so it
-    cannot be swapped between the checks and the exec. Returns (version, why)."""
+    with an O_PATH descriptor, must be the inode that was read, and is
+    executed through /proc/self/fd/N, so it cannot be swapped between the
+    checks and the exec. Returns (version, why)."""
     me = os.geteuid()
     try:
         real = os.path.realpath(path)
@@ -316,14 +297,14 @@ def exec_version_hardened(path, expect=None, timeout=10):
         return None, "cannot open: %s" % (getattr(e, "strerror", None) or e)
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None, "not a regular file"
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            return None, "not a regular file with one link"
         if expect and (st.st_dev, st.st_ino) != tuple(expect):
             return None, "file changed since it was found"
         if me == 0 and st.st_uid != 0:
             return None, "running as root: refusing a binary not owned by root"
         if not trusted_owner_ok(st, me):
-            return None, "binary owned by uid %d or writable by group/others" % st.st_uid
+            return None, "binary %s" % untrusted_reason(st, me)
         d = os.path.dirname(real)
         while True:
             try:
@@ -331,8 +312,7 @@ def exec_version_hardened(path, expect=None, timeout=10):
             except OSError as e:
                 return None, "cannot stat %s: %s" % (d, e.strerror)
             if not trusted_owner_ok(dst, me):
-                return None, "directory %s is owned by uid %d or writable by group/others" % (
-                    d, dst.st_uid)
+                return None, "directory %s is %s" % (d, untrusted_reason(dst, me))
             if d == "/":
                 break
             d = os.path.dirname(d)
@@ -355,9 +335,7 @@ def judge_binary(info, fixed, name_hint=None):
     if info.get("error") and not info.get("version"):
         reason = info["error"]
     if not info.get("version") and name_hint:
-        reason += "; the directory name says %s, which is not proof" % name_hint
-    if not info.get("version") and info.get("header_refused"):
-        reason += "; %s" % info["header_refused"]
+        reason += "; from path: %s (a hint, not proof)" % name_hint
     if not info.get("version") and info.get("exec_refused"):
         reason += "; --exec-version refused: %s" % info["exec_refused"]
     if info.get("shared"):
@@ -462,11 +440,10 @@ def scan_processes(proc_root, inspector, fixed, table):
         # process runs even if the file was replaced or lives in a container.
         # Run --version only on the same file in our own mount namespace.
         # Read the binary through /proc/<pid>/exe: the inode the process
-        # runs. node_version.h and --exec-version only apply to the same file
-        # in our own mount namespace, never to a replaced (deleted) binary.
+        # runs. --exec-version only applies to the same file in our own mount
+        # namespace, never to a replaced (deleted) binary.
         own = not deleted and not foreign and same_file(path, os.path.join(base, "exe"))
         info = dict(inspector.inspect(os.path.join(base, "exe"),
-                                      install_path=path if own else None,
                                       exec_path=path if own else None, magic=True))
         deleted_libs, shared_libs = mapped_libs(base)
         info["shared"] = sorted(set(info.get("shared") or []) | set(shared_libs))
@@ -563,15 +540,23 @@ def node_for(path):
     return os.path.join(path, "node")
 
 
-def judge_path(path, inspector, fixed):
+def judge_path(path, inspector, fixed, tool_uses_path=True):
     """Judge a Node path found in a config file. Pinned means the path itself
-    names one install, so it will not follow the next upgrade."""
+    names one install, so it will not follow the next upgrade. npm, npx and
+    corepack start with `#!/usr/bin/env node`, so run directly they use the
+    first node on PATH, not the one next to them: a fixed neighbour proves
+    nothing (tool_uses_path=False when pm2 passes the interpreter itself)."""
     node = node_for(path)
     pin = pinned_version(path)
     if os.path.exists(node):
-        info = inspector.inspect(node, install_path=node, exec_path=node)
+        info = inspector.inspect(node, exec_path=node)
         status, reason = judge_binary(info, fixed, pin or pinned_version(os.path.realpath(node)))
         version = info.get("version")
+        if tool_uses_path and os.path.basename(path) in ("npm", "npx", "corepack") \
+                and status == "patched":
+            status = "unknown"
+            reason += ("; %s runs on the first `node` on the PATH it is started with, "
+                       "which this line does not show" % os.path.basename(path))
     else:
         version = pin
         status, reason = "missing", "%s does not exist" % node
@@ -607,8 +592,16 @@ def find_node_paths(text):
 
 
 def scan_text_sources(sources, inspector, fixed):
+    """sources: (label, text) or (label, None, error) for a file that should
+    have been read but could not be: that is unknown, not clean."""
     results = []
-    for label, text in sources:
+    for src in sources:
+        label, text = src[0], src[1]
+        if text is None:
+            results.append({"where": label, "path": None, "node": None, "pinned": False,
+                            "version": None, "status": "unknown",
+                            "reason": "cannot read: %s" % src[2]})
+            continue
         for no, p in find_node_paths(text):
             r = judge_path(p, inspector, fixed)
             r["where"] = "%s:%d" % (label, no)
@@ -616,15 +609,23 @@ def scan_text_sources(sources, inspector, fixed):
     return results
 
 
+def read_source(path, sources, limit=MAX_READ):
+    """Append (path, text) or (path, None, error); a file above the limit is
+    an error too, so a long config is never silently cut short."""
+    try:
+        data = safe_read(path, limit=limit + 1, binary=True)
+        if len(data) > limit:
+            raise OSError(27, "larger than %d MB" % (limit >> 20))
+        sources.append((path, data.decode("utf-8", "replace")))
+    except OSError as e:
+        sources.append((path, None, e.strerror or str(e)))
+
+
 def crontab_sources(args):
     sources = []
     if args.crontab_file:
         for f in args.crontab_file:
-            try:
-                sources.append((f, safe_read(f)))
-            except OSError as e:
-                sources.append((f, ""))
-                print("note: cannot read %s: %s" % (clean(f), e.strerror), file=sys.stderr)
+            read_source(f, sources)
         return sources
     if shutil.which("crontab"):
         try:
@@ -633,53 +634,73 @@ def crontab_sources(args):
                 sources.append(("crontab -l (%s)" % username(os.geteuid()), out.stdout))
         except (OSError, subprocess.SubprocessError):
             pass
-    pats = ["/etc/crontab", "/etc/cron.d/*"]
+    # cron.d files are crontabs; cron.hourly and friends are scripts cron runs.
+    pats = ["/etc/crontab", "/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*",
+            "/etc/cron.weekly/*", "/etc/cron.monthly/*"]
     if os.geteuid() == 0:
         pats += ["/var/spool/cron/crontabs/*", "/var/spool/cron/*"]
     for pat in pats:
         for f in sorted(glob.glob(pat)):
             if os.path.isfile(f):
-                try:
-                    sources.append((f, safe_read(f)))
-                except (OSError, UnicodeDecodeError):
-                    pass
+                read_source(f, sources)
     return sources
 
+
+ENV_FILE_RE = re.compile(r"^\s*EnvironmentFile\s*=\s*(.+?)\s*$", re.M)
 
 SYSTEMD_DIRS = ["/etc/systemd/system", "/run/systemd/system", "/usr/local/lib/systemd/system",
                 "/lib/systemd/system", "/usr/lib/systemd/system", "/etc/systemd/user",
                 "~/.config/systemd/user"]
+UNIT_PATTERNS = ("*.service", "*.service.d/*.conf", "*.timer", "*/*.service")
 
 
 def systemd_sources(dirs):
-    sources = []
+    files = []
     for d in dirs:
         d = os.path.expanduser(d)
-        for pat in ("*.service", "*.service.d/*.conf", "*.timer", "*/*.service"):
-            for f in sorted(glob.glob(os.path.join(d, pat))):
-                if not os.path.isfile(f):
-                    continue
-                try:
-                    sources.append((f, safe_read(f)))
-                except (OSError, UnicodeDecodeError):
-                    pass
+        for pat in UNIT_PATTERNS:
+            files += sorted(glob.glob(os.path.join(d, pat)))
     if os.geteuid() == 0:
-        for f in sorted(glob.glob("/home/*/.config/systemd/user/*.service")):
+        for pat in ("*.service", "*.service.d/*.conf"):
+            files += sorted(glob.glob(os.path.join("/home/*/.config/systemd/user", pat)))
+    sources, seen = [], set()
+    for f in files:
+        real = os.path.realpath(f)
+        if real in seen or not os.path.isfile(f):
+            continue  # listed twice through symlinks, or not a regular file
+        seen.add(real)
+        read_source(f, sources)
+    # EnvironmentFile= can set PATH (or name a node) outside the unit.
+    for src in list(sources):
+        label, text = src[0], src[1]
+        if text is None:
+            continue
+        for m in ENV_FILE_RE.finditer(text):
             try:
-                sources.append((f, safe_read(f)))
-            except (OSError, UnicodeDecodeError):
-                pass
-    # A unit can be listed twice through symlinks; keep the first.
-    seen, out = set(), []
-    for label, text in sources:
-        real = os.path.realpath(label)
-        if real not in seen:
-            seen.add(real)
-            out.append((label, text))
-    return out
+                tokens = shlex.split(m.group(1))
+            except ValueError:
+                tokens = [m.group(1)]
+            for token in tokens:
+                token = token.lstrip("-")
+                where = "%s (EnvironmentFile of %s)" % (token, os.path.basename(label))
+                if "%" in token or not token.startswith("/"):
+                    sources.append((where, None, "uses a systemd specifier or a relative path"))
+                    continue
+                for env_file in sorted(glob.glob(token)) or [token]:
+                    if os.path.realpath(env_file) in seen or not os.path.lexists(env_file):
+                        continue
+                    seen.add(os.path.realpath(env_file))
+                    before = len(sources)
+                    read_source(env_file, sources)
+                    last = sources[before]
+                    sources[before] = ("%s (EnvironmentFile of %s)" % (env_file, os.path.basename(label)),
+                                       ) + tuple(last[1:])
+    return sources
 
 
 def extra_sources(paths):
+    """Text files under the given paths. Binary files, files over 1 MB and
+    anything that is not a regular file are skipped."""
     sources = []
     for root in paths:
         root = os.path.expanduser(root)
@@ -690,13 +711,14 @@ def extra_sources(paths):
                 dirnames[:] = []
             files += [os.path.join(dirpath, f) for f in filenames]
         for f in sorted(files):
+            if not os.path.isfile(f) or os.path.islink(f):
+                continue
             try:
                 data = safe_read(f, limit=(1 << 20) + 1, binary=True)
-            except OSError:
+            except OSError as e:
+                sources.append((f, None, e.strerror or str(e)))
                 continue
-            if len(data) > 1 << 20:
-                continue
-            if b"\0" in data[:4096]:
+            if len(data) > 1 << 20 or b"\0" in data[:4096]:
                 continue
             sources.append((f, data.decode("utf-8", "replace")))
     return sources
@@ -730,9 +752,10 @@ MANAGERS = [
 ]
 
 
-def installed_versions(homes, fixed):
-    """Node installs kept by version managers. They only count when something
-    uses them, so here only the default alias affects the exit code."""
+def installed_versions(homes, fixed, inspector):
+    """Node installs kept by version managers, judged by reading each binary.
+    Installs only count when something uses them, so only the default alias
+    and the shell's `node` affect the exit code."""
     out, seen = [], set()
     for home in homes:
         nvm = os.environ.get("NVM_DIR") if home == os.path.expanduser("~") else None
@@ -748,104 +771,148 @@ def installed_versions(homes, fixed):
                 bins = sorted(glob.glob(pat))
                 if not bins:
                     continue
-                default = None
+                versions = []
+                for b in bins:
+                    info = inspector.inspect(b)
+                    st, _ = judge_binary(info, fixed, pinned_version(b))
+                    versions.append({"version": info.get("version") or "%s?" % pinned_version(b),
+                                     "status": st})
+                default, d_status, d_reason = None, None, None
                 if alias:
                     a = alias.format(**ctx)
+                    target = None
                     if os.path.islink(a):
-                        default = pinned_version(os.path.realpath(a))
+                        target = os.path.realpath(a)
+                        default = pinned_version(target) or target
                     elif os.path.isfile(a):
                         try:
                             raw = safe_read(a, limit=4096).strip()
                         except OSError:
                             raw = "unreadable"
-                        default = raw if VERSION_RE.match(raw) else "alias %r" % raw
-                versions = []
-                for b in bins:
-                    v = pinned_version(b)
-                    st, why = classify(v, fixed)
-                    versions.append({"version": v, "status": st})
-                d_status = None
-                if default:
-                    d_status = classify(default, fixed)[0] if VERSION_RE.match(default) else "unknown"
+                        default = raw
+                        if VERSION_RE.match(raw):
+                            target = os.path.join(os.path.dirname(os.path.dirname(a)),
+                                                  "versions", "node", "v" + raw.lstrip("v"))
+                    if default and target:
+                        node = next((c for c in (os.path.join(target, "bin", "node"),
+                                                 os.path.join(target, "installation", "bin", "node"))
+                                     if os.path.exists(c)), None)
+                        if node:
+                            info = inspector.inspect(node)
+                            d_status, d_reason = judge_binary(info, fixed, pinned_version(node))
+                            default = info.get("version") or default
+                        else:
+                            d_status, d_reason = "missing", "the default names no installed Node"
+                    elif default:
+                        d_status, d_reason = "unknown", "alias %r is not an exact version" % default
                 out.append({"manager": name, "where": os.path.dirname(pat.split("*")[0].rstrip("/")),
-                            "versions": versions, "default": default, "default_status": d_status})
+                            "versions": versions, "default": default, "default_status": d_status,
+                            "default_reason": d_reason})
     which = shutil.which("node")
     shell = None
     if which:
+        # Our own PATH: resolving its symlinks is fine.
         real = os.path.realpath(which)
-        shell = {"path": which, "real": real, "version": pinned_version(real)}
-        shell["status"] = classify(shell["version"], fixed)[0] if shell["version"] else "unknown"
+        info = inspector.inspect(real)
+        st, why = judge_binary(info, fixed, pinned_version(real))
+        shell = {"path": which, "real": real, "version": info.get("version"), "status": st,
+                 "reason": why}
     return out, shell
 
 
 # ---------------------------------------------------------------- pm2
 
-def resolve_on_path(path_value, name="node"):
-    """First executable `name` on a saved PATH, like execvp would find it."""
+def resolve_on_path(path_value, cwd=None, skip_ephemeral=False, name="node"):
+    """First executable `name` on a saved PATH, like execvp would find it.
+    Empty and relative entries are resolved against the app's cwd. With
+    skip_ephemeral, fnm multishell dirs (gone after a reboot) are skipped,
+    because that is what a resurrected app will see. Returns (dir, notes)."""
+    notes = []
     for d in (path_value or "").split(":"):
-        if not d:
+        if not d or not d.startswith("/"):
+            if not cwd:
+                notes.append("relative PATH entry %r skipped: no cwd" % d)
+                continue
+            d = os.path.join(cwd, d)
+        if skip_ephemeral and FNM_MULTISHELL_RE.search(d):
+            notes.append("skipped %s: an fnm multishell dir does not survive a reboot" % d)
             continue
         cand = os.path.join(d, name)
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return d, cand
-    return None, None
+            return d, notes
+    return None, notes
 
 
-def pm2_entry(entry, inspector, fixed, procs_by_pid, table, daemon=None):
-    env = entry.get("pm2_env", entry)
-    name = env.get("name") or entry.get("name") or "?"
-    interp = env.get("exec_interpreter") or ""
-    script = env.get("pm_exec_path") or ""
-    path_value = env.get("PATH") or (env.get("env") or {}).get("PATH") or ""
+def pm2_entry(entry, inspector, fixed, procs_by_pid, table, daemon=None, saved=False):
+    env = entry.get("pm2_env", entry) if isinstance(entry, dict) else None
+    if not isinstance(env, dict):
+        return {"name": "?", "status_pm2": None, "pid": None, "cluster": False, "interpreter": "",
+                "script": "", "running": [], "status": "unknown",
+                "findings": [{"what": "entry", "path": None, "pinned": False, "version": None,
+                              "status": "unknown", "reason": "malformed pm2 entry"}]}
+    text = lambda v: v if isinstance(v, str) else ""  # noqa: E731
+    name = text(env.get("name")) or text(entry.get("name")) or "?"
+    interp = text(env.get("exec_interpreter"))
+    script = text(env.get("pm_exec_path"))
+    sub_env = env.get("env") if isinstance(env.get("env"), dict) else {}
+    path_value = text(env.get("PATH")) or text(sub_env.get("PATH"))
+    cwd = text(env.get("pm_cwd")) or text(env.get("cwd")) or None
     cluster = env.get("exec_mode") == "cluster_mode"
+    bare = interp in ("node", "nodejs")
     findings = []
 
     if cluster:
         # Cluster workers are forked by the daemon with its own
-        # process.execPath: interpreter and PATH do not choose the binary.
+        # process.execPath: interpreter and PATH do not choose their binary.
         if daemon and daemon.get("version"):
+            reason = "cluster mode runs on the daemon's Node: %s" % daemon.get("reason")
+            if saved:
+                reason += "; after a reboot, the Node that starts pm2 (startup unit PATH) decides"
             findings.append({"what": "daemon node", "path": daemon.get("exe"), "pinned": False,
                              "version": daemon.get("version"), "status": daemon["status"],
-                             "reason": "cluster mode runs on the daemon's Node: %s" % daemon.get("reason")})
+                             "reason": reason})
         else:
             findings.append({"what": "daemon node", "path": None, "pinned": False, "version": None,
-                             "status": "none", "reason": "cluster mode runs on whichever Node starts "
-                             "the pm2 daemon (systemd unit PATH or your shell)"})
-        interp = interp if interp.startswith("/") else ""
-    if interp.startswith("/") and not cluster:
-        r = judge_path(interp, inspector, fixed)
+                             "status": "unknown", "reason": "cluster mode runs on the Node that "
+                             "starts the pm2 daemon, which could not be determined"})
+    elif interp.startswith("/"):
+        r = judge_path(interp, inspector, fixed, tool_uses_path=False)
         r["what"] = "interpreter"
         findings.append(r)
     if script.startswith("/") and pinned_version(script) and re.search(r"node", script, re.I):
-        r = judge_path(script, inspector, fixed)
+        r = judge_path(script, inspector, fixed, tool_uses_path=False)
         r["what"] = "script"
         findings.append(r)
     running = []
     pid = entry.get("pid") or env.get("pid")
-    if pid:
+    if isinstance(pid, int) and pid:
         tree = {pid} | descendants(pid, table)
         running = [procs_by_pid[p] for p in sorted(tree) if p in procs_by_pid]
+    else:
+        pid = None
     # The saved PATH decides which node a bare `node` interpreter, a
     # `#!/usr/bin/env node` script or a child process gets. It does not
     # matter for an entry that runs Python or bash and starts no Node.
-    other_interp = interp.startswith("/") and os.path.basename(interp) not in ("node", "nodejs") \
-        or (interp and not interp.startswith("/") and interp not in ("node", "none"))
-    d, node = resolve_on_path(path_value)
-    if cluster or (other_interp and not running):
+    other_interp = (interp.startswith("/") and os.path.basename(interp) not in ("node", "nodejs")) \
+        or (interp and not interp.startswith("/") and not bare and interp != "none")
+    d, notes = resolve_on_path(path_value, cwd, skip_ephemeral=saved)
+    if other_interp and not running:
         pass
     elif d:
         r = judge_path(d, inspector, fixed)
         r["what"] = "PATH node"
         if FNM_MULTISHELL_RE.search(d):
-            r["reason"] += "; fnm multishell dir: gone after reboot, then PATH falls through"
+            r["reason"] += "; fnm multishell dir: gone after a reboot"
+        if notes:
+            r["reason"] += "; " + "; ".join(notes)
         findings.append(r)
-    elif interp == "node":
+    elif bare and not cluster:
         findings.append({"what": "PATH node", "path": None, "pinned": False, "version": None,
-                         "status": "unknown", "reason": "no node on the saved PATH"})
+                         "status": "unknown",
+                         "reason": "no node on the saved PATH" + ("; " + "; ".join(notes) if notes else "")})
     statuses = [f["status"] for f in findings] + [p["status"] for p in running]
-    return {"name": name, "status_pm2": env.get("status"), "pid": pid, "cluster": cluster,
-            "interpreter": env.get("exec_interpreter") or "",
-            "script": script, "findings": findings, "running": running,
+    return {"name": name, "status_pm2": text(env.get("status")), "pid": pid, "cluster": cluster,
+            "interpreter": interp, "script": script, "findings": findings, "running": running,
             "status": worst(statuses) if statuses else "none"}
 
 
@@ -884,8 +951,13 @@ def pm2_live(home, args, proc_root):
         dpid = int(safe_read(os.path.join(home, "pm2.pid"), limit=64).strip())
     except (OSError, ValueError):
         return None, "no daemon pid file"
-    if not os.path.exists(os.path.join(proc_root, str(dpid))):
+    try:
+        title = read_proc(os.path.join(proc_root, str(dpid), "cmdline"), "rb")
+    except OSError:
         return None, "daemon not running"
+    if not title.startswith(b"PM2 v"):
+        # A stale pid file: pm2 jlist would start a new daemon.
+        return None, "daemon not running (pid %d is not a pm2 daemon)" % dpid
     try:
         owner = os.stat(home).st_uid
     except OSError:
@@ -894,14 +966,21 @@ def pm2_live(home, args, proc_root):
         return None, "owned by %s: live list skipped, saved list only" % username(owner)
     pm2 = args.pm2_bin or shutil.which("pm2")
     if not pm2:
-        return None, "pm2 CLI not found"
+        return None, "FAIL: pm2 daemon runs but no pm2 CLI was found"
+    try:
+        cli = os.stat(os.path.realpath(pm2))
+    except OSError as e:
+        return None, "FAIL: cannot stat the pm2 CLI: %s" % e.strerror
+    if not trusted_owner_ok(cli, os.geteuid()):
+        return None, "FAIL: pm2 CLI %s is %s: not run, live list skipped" % (
+            pm2, untrusted_reason(cli, os.geteuid()))
     env = dict(os.environ, PM2_HOME=home)
     try:
         out = subprocess.run([pm2, "jlist"], capture_output=True, text=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as e:
-        return None, "pm2 jlist failed: %s" % e
+        return None, "FAIL: pm2 jlist failed: %s" % e
     data = load_json_list(out.stdout)
-    return data, (None if data is not None else "pm2 jlist gave no JSON")
+    return data, (None if data is not None else "FAIL: pm2 jlist gave no JSON")
 
 
 def pm2_daemon(home, proc_root, procs_by_pid):
@@ -916,7 +995,10 @@ def pm2_daemon(home, proc_root, procs_by_pid):
 
 # ---------------------------------------------------------------- containers
 
-def container_checks(cli, fixed):
+def container_checks(cli, fixed, run_exec=True):
+    """Running containers of one CLI. By default it asks the container to run
+    `node --version` (docker exec), which runs the container's own binary
+    inside the container, never on the host."""
     results = []
     try:
         out = subprocess.run([cli, "ps", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}"],
@@ -924,21 +1006,28 @@ def container_checks(cli, fixed):
     except (OSError, subprocess.SubprocessError) as e:
         return None, "%s ps failed: %s" % (cli, e)
     if out.returncode != 0:
-        return None, "%s ps failed: %s" % (cli, (out.stderr or "").strip().splitlines()[:1])
+        return None, "%s ps failed: %s" % (cli, " ".join((out.stderr or "").strip().splitlines()[:1]))
     for line in out.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
             continue
         cid, name, image = parts[0], parts[1], parts[2]
-        version = None
-        try:
-            r = subprocess.run([cli, "exec", "-e", "NODE_OPTIONS=", cid, "node", "--version"],
-                               capture_output=True, text=True, timeout=30)
-            first = (r.stdout or "").strip().splitlines()
-            if r.returncode == 0 and first and VERSION_RE.match(first[0]):
-                version = first[0].strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        version, exec_error, no_node = None, None, False
+        if run_exec:
+            try:
+                r = subprocess.run([cli, "exec", "-e", "NODE_OPTIONS=", cid, "node", "--version"],
+                                   capture_output=True, text=True, timeout=30)
+                first = (r.stdout or "").strip().splitlines()
+                if r.returncode == 0 and first and VERSION_RE.match(first[0]):
+                    version = first[0].strip()
+                elif r.returncode in (126, 127) or "not found" in (r.stderr or "") \
+                        or "no such file" in (r.stderr or "").lower():
+                    no_node = True
+                else:
+                    exec_error = "exec exit %d: %s" % (r.returncode, " ".join(
+                        (r.stderr or r.stdout or "").strip().splitlines()[:1]))
+            except (OSError, subprocess.SubprocessError) as e:
+                exec_error = "exec failed: %s" % e
         env_version = None
         try:
             r = subprocess.run([cli, "inspect", "--format",
@@ -949,17 +1038,24 @@ def container_checks(cli, fixed):
                     env_version = env_line.split("=", 1)[1].strip()
         except (OSError, subprocess.SubprocessError):
             pass
-        if not version and not env_version:
-            continue
         if version:
             status, reason = classify(version, fixed)
             if env_version and env_version.lstrip("v") != version.lstrip("v"):
                 reason += "; image ENV says NODE_VERSION=%s" % env_version
-        else:
+        elif exec_error:
+            status, reason = "unknown", exec_error
+        elif not run_exec and env_version:
+            status, reason = "unknown", ("image ENV says NODE_VERSION=%s (a hint, not proof); "
+                                         "drop --no-container-exec to ask the container" % env_version)
+        elif not run_exec:
+            status, reason = "unknown", "not checked (--no-container-exec)"
+        elif no_node and env_version:
             status, reason = "unknown", ("no node on the container PATH; image ENV says "
                                          "NODE_VERSION=%s" % env_version)
+        else:
+            continue  # no node on the container PATH and no NODE_VERSION: not a Node container
         results.append({"id": cid[:12], "name": name, "image": image, "version": version,
-                        "status": status, "reason": reason})
+                        "cli": os.path.basename(cli), "status": status, "reason": reason})
     return results, None
 
 
@@ -1023,13 +1119,16 @@ def print_report(rep, red, out=None):
         for n in p.get("notes", []):
             w("      note: %s\n" % red(n))
     if rep.get("hidden"):
-        w("  %d other processes could not be inspected (run as root to see every user)\n"
+        w("  %d processes of other users not inspected: run the script as their owner\n"
           % rep["hidden"])
 
     for sec in rep["pm2"]:
         w("\npm2 %s (%s)\n" % (sec["kind"], red(sec["source"])))
         if sec.get("error"):
-            w("  %s\n" % red(sec["error"]))
+            if sec.get("error_status"):
+                w("  %-13s %s\n" % (tag(sec["error_status"]), red(sec.get("error_text") or sec["error"])))
+            else:
+                w("  %s\n" % red(sec["error"]))
         d = sec.get("daemon")
         if d:
             w("  %-13s daemon pid %s %s %s\n" % (tag(d["status"]), d.get("pid"),
@@ -1061,11 +1160,15 @@ def print_report(rep, red, out=None):
             w("      installed: %s\n" % ", ".join("%s (%s)" % (v["version"], v["status"])
                                                 for v in m["versions"]))
             if m["default"]:
-                w("      %-13s default alias -> %s\n" % (tag(m["default_status"]), m["default"]))
+                w("      %-13s default alias -> %s\n" % (tag(m["default_status"]), red(m["default"])))
+                if m["default_status"] != "patched" and m.get("default_reason"):
+                    w("          why: %s\n" % red(m["default_reason"]))
         if inst.get("shell"):
             sh = inst["shell"]
             w("  %-13s `node` on this shell's PATH -> %s %s\n" % (
                 tag(sh["status"]), sh.get("version") or "?", red(sh["real"])))
+            if sh["status"] != "patched":
+                w("          why: %s\n" % red(sh.get("reason")))
         w("  old installs are fine to keep for rollback; they matter when something above points at them\n")
 
     for key, title in (("cron", "Crontabs"), ("systemd", "systemd units"), ("extra", "Other files")):
@@ -1077,8 +1180,9 @@ def print_report(rep, red, out=None):
             w("  none found\n")
         for r in items:
             w("  %-13s %s\n" % (tag(r["status"]), red(r["where"])))
-            w("      %s -> %s%s\n" % (red(r["path"]), r.get("version") or "?",
-                                     "  (pinned to one install)" if r.get("pinned") else ""))
+            if r.get("path"):
+                w("      %s -> %s%s\n" % (red(r["path"]), r.get("version") or "?",
+                                         "  (pinned to one install)" if r.get("pinned") else ""))
             if r["status"] != "patched":
                 w("      why: %s\n" % red(r["reason"]))
             if r.get("unit_state"):
@@ -1090,10 +1194,13 @@ def print_report(rep, red, out=None):
     w("\nContainers\n")
     if rep["containers"].get("error"):
         w("  %s\n" % red(rep["containers"]["error"]))
+    for err in rep["containers"].get("errors", []):
+        w("  %-13s %s\n" % (tag("unknown"), red(err)))
     for c in rep["containers"].get("items", []):
-        w("  %-13s %s %s node %s\n" % (tag(c["status"]), red(c["name"]), c["image"], c.get("version") or "?"))
+        w("  %-13s %s %s node %s\n" % (tag(c["status"]), red(c["name"]), red(c["image"]),
+                                       c.get("version") or "?"))
         if c["status"] != "patched":
-            w("      why: %s\n" % c["reason"])
+            w("      why: %s\n" % red(c["reason"]))
 
     w("\nresult: %s (exit %d)\n" % (rep["result"], rep["exit"]))
 
@@ -1105,7 +1212,8 @@ def build_report(args):
     inspector = BinaryInspector(exec_version=args.exec_version)
     notes = []
     if os.geteuid() != 0:
-        notes.append("not root: only your own processes, crontab and pm2 are fully visible")
+        notes.append("covers the processes, crontab and pm2 of %s; run it as each user that "
+                     "owns Node processes" % username(os.geteuid()))
 
     table = proc_table(args.proc_root)
     procs, hidden = scan_processes(args.proc_root, inspector, fixed, table)
@@ -1122,19 +1230,25 @@ def build_report(args):
                 daemon = pm2_daemon(home, args.proc_root, by_pid)
                 sec = {"kind": "live list", "source": "pm2 jlist, PM2_HOME=%s" % home,
                        "error": err if live is None else None, "daemon": daemon,
+                       "error_status": "unknown" if (live is None and err and err.startswith("FAIL")) else None,
+                       "error_text": (err or "")[len("FAIL: "):] if (err or "").startswith("FAIL: ") else err,
                        "entries": [pm2_entry(e, inspector, fixed, by_pid, table, daemon)
                                    for e in (live or [])]}
                 pm2_sections.append(sec)
             dump = args.pm2_dump_file or os.path.join(home, "dump.pm2")
             if os.path.isfile(dump):
+                err = None
                 try:
                     saved = load_json_list(safe_read(dump, limit=64 << 20))
+                    if saved is None:
+                        err = "cannot parse %s" % dump
                 except OSError as e:
-                    saved, notes_err = None, e.strerror
+                    saved, err = None, "cannot read %s: %s" % (dump, e.strerror or e)
+                live_daemon = pm2_daemon(home, args.proc_root, by_pid)
                 sec = {"kind": "saved list", "source": "%s, what a reboot or pm2 resurrect starts" % dump,
-                       "entries": [pm2_entry(e, inspector, fixed, {}, {}) for e in (saved or [])]}
-                if saved is None:
-                    sec["error"] = "cannot parse %s" % dump
+                       "error": err, "error_status": "unknown" if err else None,
+                       "entries": [pm2_entry(e, inspector, fixed, {}, {}, live_daemon, saved=True)
+                                   for e in (saved or [])]}
                 pm2_sections.append(sec)
             if args.pm2_dump_file:
                 break
@@ -1145,7 +1259,7 @@ def build_report(args):
         homes = [os.path.expanduser("~")]
         if os.geteuid() == 0:
             homes += sorted(glob.glob("/home/*"))
-        managers, shell = installed_versions(homes, fixed)
+        managers, shell = installed_versions(homes, fixed, inspector)
         rep["installs"] = {"managers": managers, "shell": shell}
     if not args.no_cron:
         rep["cron"] = scan_text_sources(crontab_sources(args), inspector, fixed)
@@ -1153,27 +1267,36 @@ def build_report(args):
         sd = scan_text_sources(systemd_sources(args.systemd_dir or SYSTEMD_DIRS), inspector, fixed)
         for r in sd:
             unit_file = r["where"].rsplit(":", 1)[0]
-            if "pm2" in os.path.basename(unit_file) and not args.systemd_dir:
+            if "pm2" in os.path.basename(unit_file) and not args.systemd_dir \
+                    and unit_file.endswith(".service"):
                 r["unit_state"] = pm2_unit_state(unit_file)
         rep["systemd"] = sd
     if args.scan_path:
         rep["extra"] = scan_text_sources(extra_sources(args.scan_path), inspector, fixed)
 
-    if not args.no_containers:
-        cli = args.container_cli or shutil.which("docker") or shutil.which("podman")
-        if not cli:
-            rep["containers"] = {"error": "no docker or podman CLI found", "items": []}
-        else:
-            items, err = container_checks(cli, fixed)
-            rep["containers"] = {"error": err, "items": items or []}
+    rep["containers"] = {"error": None, "errors": [], "items": []}
+    if args.no_containers:
+        rep["containers"]["error"] = "skipped"
     else:
-        rep["containers"] = {"error": "skipped", "items": []}
+        clis = [args.container_cli] if args.container_cli else \
+            [c for c in (shutil.which("docker"), shutil.which("podman")) if c]
+        if not clis:
+            rep["containers"]["error"] = "no docker or podman CLI found"
+        for cli in clis:
+            items, err = container_checks(cli, fixed, run_exec=not args.no_container_exec)
+            rep["containers"]["items"] += items or []
+            if err:
+                rep["containers"]["errors"].append(err)
 
     statuses = [p["status"] for p in procs]
     for sec in pm2_sections:
         statuses += [e["status"] for e in sec["entries"]]
         if sec.get("daemon"):
             statuses.append(sec["daemon"]["status"])
+        if sec.get("error_status"):
+            statuses.append(sec["error_status"])
+    if rep["containers"]["errors"]:
+        statuses.append("unknown")
     for key in ("cron", "systemd", "extra"):
         statuses += [r["status"] for r in rep.get(key) or []]
     statuses += [c["status"] for c in rep["containers"].get("items", [])]
@@ -1207,6 +1330,8 @@ def main(argv=None):
     ap.add_argument("--no-cron", action="store_true")
     ap.add_argument("--no-systemd", action="store_true")
     ap.add_argument("--no-containers", action="store_true")
+    ap.add_argument("--no-container-exec", action="store_true",
+                    help="do not run `node --version` inside containers; image metadata only")
     ap.add_argument("--no-installs", action="store_true", help="skip nvm/fnm/... install listing")
     ap.add_argument("--container-cli", help="docker or podman binary (default: auto)")
     ap.add_argument("--pm2-bin", help="pm2 CLI (default: pm2 on PATH)")

@@ -1,8 +1,8 @@
-# 2026-10-22T06:39:27Z Raspberry Pi (Debian 12, aarch64), Node via fnm, pm2 6.0.14, run as a normal user
+# 2026-10-22T06:55:09Z Raspberry Pi (Debian 12, aarch64), Node via fnm, pm2 6.0.14, run as the user that owns the Node processes
 $ python3 node_runtime_audit.py --redact
 node-runtime-audit: Node.js security release of 2026-10-21, fixed releases v22.23.4, v24.22.1, v26.12.1
 lines without a fix (end-of-life) count as vulnerable
-note: not root: only your own processes, crontab and pm2 are fully visible
+note: covers the processes, crontab and pm2 of USER; run it as each user that owns Node processes
 
 Running Node processes (real binary from /proc/<pid>/exe)
   [vulnerable]  pid 1883303  v24.14.0  USER       /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
@@ -21,16 +21,11 @@ Running Node processes (real binary from /proc/<pid>/exe)
       cmd: node /home/USER/projects/app-1/.next/dev/build/postcss.js 38963
       parents: node(1883390) <- node(1883371) <- bun(1883370) <- node(1883303)
       why: v24.14.0 < v24.22.1
-  178 other processes could not be inspected (run as root to see every user)
+  177 processes of other users not inspected: run the script as their owner
 
 pm2 live list (pm2 jlist, PM2_HOME=/home/USER/.pm2)
+  [unknown]     pm2 CLI /home/USER/.bun/bin/pm2 is writable by group or others (mode 777): not run, live list skipped
   [vulnerable]  daemon pid 1883303 v24.14.0 /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
-  [vulnerable]  app-1  online pid 1883370
-      interpreter: none
-      script:      /home/USER/.bun/bin/bun
-      PATH node:   v24.14.0  /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin  (pinned)
-          vulnerable: v24.14.0 < v24.22.1
-      running:     3 Node process(es) in this entry's tree: v24.14.0
 
 pm2 saved list (/home/USER/.pm2/dump.pm2, what a reboot or pm2 resurrect starts)
   [vulnerable]  app-1  online

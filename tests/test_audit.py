@@ -143,6 +143,9 @@ class FakeHost:
         self.dump = os.path.join(r, "dump.pm2")
         json.dump(dump, open(self.dump, "w"))
         self.crontab = render(os.path.join(FIX, "crontab.txt"), os.path.join(r, "crontab"), r)
+        os.makedirs(os.path.join(r, "etc/default"))
+        open(os.path.join(r, "etc/default/api"), "w").write(
+            "NODE_ENV=production\nPATH=%s:/usr/bin:/bin\n" % os.path.dirname(self.old))
         self.units = os.path.join(r, "units")
         for u in os.listdir(os.path.join(FIX, "units")):
             render(os.path.join(FIX, "units", u), os.path.join(self.units, u), r)
@@ -205,7 +208,7 @@ class ClassifyTest(unittest.TestCase):
 
     def test_parse_fixed(self):
         self.assertEqual(nra.parse_fixed("24=24.22.1")[24], (24, 22, 1))
-        for bad in ("", "24", "x=1.2.3", "24=24.22.1-rc.1"):
+        for bad in ("", "24", "x=1.2.3", "24=24.22.1-rc.1", "24=22.23.4"):
             with self.assertRaises(ValueError):
                 nra.parse_fixed(bad)
 
@@ -253,7 +256,7 @@ class HostTest(unittest.TestCase):
         want = {100: "vulnerable", 101: "patched", 102: "vulnerable", 103: "patched",
                 105: "vulnerable", 106: "unknown", 107: "unknown", 108: "unknown",
                 109: "unknown", 110: "vulnerable", 111: "unknown", 112: "vulnerable",
-                113: "patched", 114: "unknown", 300: "vulnerable",
+                113: "unknown", 114: "unknown", 300: "vulnerable",
                 200: "vulnerable", 212: "patched", 240: "vulnerable"}
         for pid, status in want.items():
             self.assertEqual(self.procs[pid]["status"], status, pid)
@@ -284,13 +287,15 @@ class HostTest(unittest.TestCase):
         self.assertIsNone(self.procs[111]["version"])
         self.assertIn("version not found", self.procs[111]["reason"])
 
-    def test_version_from_install_header(self):
-        self.assertEqual((self.procs[113]["version"], self.procs[113]["method"]),
-                         ("v24.22.1", "node_version.h"))
+    def test_install_header_is_not_a_version_source(self):
+        # 113 sits in an install that ships node_version.h for 24.22.1. Only
+        # the binary counts, so without an embedded version it is unknown.
+        self.assertIsNone(self.procs[113]["version"])
+        self.assertIn("from path: v24.22.1 (a hint, not proof)", self.procs[113]["reason"])
 
     def test_directory_name_is_not_proof(self):
         self.assertIsNone(self.procs[114]["version"])
-        self.assertIn("directory name says v26.12.1", self.procs[114]["reason"])
+        self.assertIn("from path: v26.12.1 (a hint, not proof)", self.procs[114]["reason"])
 
     def test_terminal_escapes_are_neutralized(self):
         for out in (run(self.host.args())[1], run(self.host.args("--json"))[1],
@@ -345,11 +350,13 @@ class HostTest(unittest.TestCase):
         # entry does not matter: only moving the daemon (pm2 update) does.
         _, live = self.pm2("live list")
         f = live["clustered"]["findings"]
-        self.assertEqual([x["what"] for x in f], ["daemon node"])
+        self.assertEqual(f[0]["what"], "daemon node")
         self.assertEqual((f[0]["version"], live["clustered"]["status"]), ("v24.14.0", "vulnerable"))
+        # Children started with `node` still use the saved PATH.
+        self.assertEqual([x["what"] for x in f], ["daemon node", "PATH node"])
         _, saved = self.pm2("saved list")
-        self.assertEqual(saved["clustered"]["status"], "none")
-        self.assertIn("starts the pm2 daemon", saved["clustered"]["findings"][0]["reason"])
+        self.assertEqual(saved["clustered"]["status"], "vulnerable")
+        self.assertIn("after a reboot", saved["clustered"]["findings"][0]["reason"])
 
     def test_saved_list_is_checked(self):
         _, saved = self.pm2("saved list")
@@ -369,6 +376,9 @@ class HostTest(unittest.TestCase):
         self.assertIn("v20.11.0 (vulnerable)", by_line[6][0]["reason"])
         self.assertNotIn(3, by_line)
         self.assertNotIn(7, by_line)
+        # npx next to a fixed node still runs on whatever node PATH gives it
+        self.assertEqual(by_line[9][0]["status"], "unknown")
+        self.assertIn("first `node` on the PATH", by_line[9][0]["reason"])
 
     def test_systemd(self):
         rows = [(os.path.basename(r["where"]), r["status"], r["pinned"]) for r in self.rep["systemd"]]
@@ -376,7 +386,9 @@ class HostTest(unittest.TestCase):
         self.assertEqual(len(pm2_rows), 4)  # PATH, ExecStart, ExecReload, ExecStop
         self.assertTrue(all(s == "vulnerable" and p for _, s, p in pm2_rows))
         api = [r for r in rows if r[0].startswith("api.service")]
-        self.assertEqual(api, [("api.service:8", "patched", False)])
+        self.assertEqual(api, [("api.service:9", "patched", False)])
+        env = [r for r in rows if "EnvironmentFile of api.service" in r[0]]
+        self.assertEqual(env, [("api (EnvironmentFile of api.service):2", "vulnerable", True)])
 
     def test_containers(self):
         c = {x["name"]: x for x in self.rep["containers"]["items"]}
@@ -384,6 +396,14 @@ class HostTest(unittest.TestCase):
         self.assertEqual(c["new-api"]["status"], "patched")
         self.assertEqual(c["distroless-app"]["status"], "unknown")
         self.assertNotIn("cache", c)
+        self.assertEqual(c["paused-app"]["status"], "unknown")
+        self.assertIn("exec exit 1", c["paused-app"]["reason"])
+
+    def test_no_container_exec(self):
+        _, out = run(self.host.args("--json", "--no-container-exec"))
+        c = {x["name"]: x for x in json.loads(out)["containers"]["items"]}
+        self.assertEqual(c["shop-api"]["status"], "unknown")
+        self.assertIn("NODE_VERSION=22.22.0 (a hint, not proof)", c["shop-api"]["reason"])
 
     def test_exit_code_and_no_secrets(self):
         self.assertEqual(self.code, 1)
@@ -458,7 +478,7 @@ class ExecVersionTest(unittest.TestCase):
         os.chmod(p, 0o775)
         version, why = nra.exec_version_hardened(p)
         self.assertIsNone(version)
-        self.assertIn("writable by group/others", why)
+        self.assertIn("writable by group or others", why)
         self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
 
     def test_writable_directory_is_refused(self):
@@ -491,7 +511,7 @@ class ExecVersionTest(unittest.TestCase):
     def test_disagreement_with_the_embedded_version_is_unknown(self):
         p = os.path.join(self.d, "node")
         script_binary(p, "v24.22.1", embedded="24.14.0")
-        info = nra.BinaryInspector(exec_version=True).inspect(p, install_path=p, exec_path=p)
+        info = nra.BinaryInspector(exec_version=True).inspect(p, exec_path=p)
         self.assertIsNone(info["version"])
         self.assertIn("--version says v24.22.1", info["error"])
         self.assertEqual(nra.judge_binary(info, FIXED)[0], "unknown")
@@ -499,7 +519,7 @@ class ExecVersionTest(unittest.TestCase):
     def test_off_by_default(self):
         p = os.path.join(self.d, "node")
         script_binary(p, "v26.12.1", marker=os.path.join(self.d, "ran"))
-        info = nra.BinaryInspector().inspect(p, install_path=p, exec_path=p)
+        info = nra.BinaryInspector().inspect(p, exec_path=p)
         self.assertIsNone(info["version"])
         self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
 
@@ -519,38 +539,40 @@ class FifoTest(unittest.TestCase):
         signal.alarm(20)
         self.addCleanup(signal.alarm, 0)
 
-    def install(self, header):
-        """bin/node without an embedded version, and node_version.h as given."""
-        root = os.path.join(self.d, "node-v24.22.1")
-        node = os.path.join(root, "bin", "node")
-        script_binary(node, "v24.22.1")
-        h = os.path.join(root, "include", "node", "node_version.h")
-        os.makedirs(os.path.dirname(h))
-        if header == "fifo":
-            os.mkfifo(h)
-        else:
-            open(h, "w").write("#define NODE_MAJOR_VERSION 24\n#define NODE_MINOR_VERSION 22\n"
-                               "#define NODE_PATCH_VERSION 1\n")
-            os.chmod(h, header)
-        return node
+    def test_device_is_refused_without_reading_it(self):
+        with self.assertRaises(OSError) as ctx:
+            nra.open_pinned("/dev/zero")
+        self.assertIn("not a regular file", str(ctx.exception))
 
-    def test_fifo_header_is_refused(self):
-        node = self.install("fifo")
-        info = nra.BinaryInspector().inspect(node, install_path=node)
-        self.assertIsNone(info["version"])
-        self.assertIn("not a regular file", info["header_refused"])
-        self.assertEqual(nra.judge_binary(info, FIXED)[0], "unknown")
+    def cron_with(self, node_path):
+        proc = os.path.join(self.d, "proc")
+        os.makedirs(proc, exist_ok=True)
+        crontab = os.path.join(self.d, "crontab-%d" % len(os.listdir(self.d)))
+        open(crontab, "w").write("* * * * * %s /srv/job.js\n" % node_path)
+        code, out = run(["--proc-root", proc, "--crontab-file", crontab, "--no-pm2", "--no-systemd",
+                         "--no-containers", "--no-installs", "--json"])
+        return code, json.loads(out)["cron"][0]
 
-    def test_header_writable_by_others_is_refused(self):
-        node = self.install(0o666)
-        info = nra.BinaryInspector().inspect(node, install_path=node)
-        self.assertIsNone(info["version"])
-        self.assertIn("writable by others", info["header_refused"])
+    def test_hard_linked_binary_is_refused(self):
+        real = os.path.join(self.d, "real/node")
+        node_binary(real, "24.22.1")
+        link = os.path.join(self.d, "hl/versions/node/v24.22.1/bin/node")
+        os.makedirs(os.path.dirname(link))
+        os.link(real, link)
+        code, row = self.cron_with(link)
+        self.assertEqual((code, row["status"]), (2, "unknown"))
+        self.assertIn("has 2 hard links", row["reason"])
 
-    def test_good_header_is_used(self):
-        node = self.install(0o644)
-        info = nra.BinaryInspector().inspect(node, install_path=node)
-        self.assertEqual((info["version"], info["method"]), ("v24.22.1", "node_version.h"))
+    def test_symlink_as_binary_is_refused(self):
+        real = os.path.join(self.d, "real2/node")
+        node_binary(real, "24.22.1")
+        link = os.path.join(self.d, "sl/versions/node/v24.22.1/bin/node")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(real, link)
+        code, row = self.cron_with(link)
+        self.assertEqual((code, row["status"]), (2, "unknown"))
+        self.assertIn("is a symlink", row["reason"])
+        self.assertIn("from path: v24.22.1", row["reason"])
 
     def test_fifos_in_config_paths_do_not_block(self):
         proc = os.path.join(self.d, "proc")
@@ -572,18 +594,89 @@ class FifoTest(unittest.TestCase):
         os.makedirs(pm2)
         os.mkfifo(os.path.join(pm2, "pm2.pid"))
         os.mkfifo(os.path.join(pm2, "dump.pm2"))
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            code, out = run(["--proc-root", proc, "--crontab-file", crontab, "--crontab-file", cron_fifo,
-                             "--scan-path", scan, "--systemd-dir", units, "--pm2-home", pm2,
-                             "--no-containers", "--no-installs", "--json"])
+        code, out = run(["--proc-root", proc, "--crontab-file", crontab, "--crontab-file", cron_fifo,
+                         "--scan-path", scan, "--systemd-dir", units, "--pm2-home", pm2,
+                         "--no-containers", "--no-installs", "--json"])
         rep = json.loads(out)
         self.assertEqual(code, 2)
         self.assertEqual(rep["cron"][0]["status"], "unknown")
         self.assertIn("not a regular file", rep["cron"][0]["reason"])
-        self.assertIn("cannot read", err.getvalue())
+        # The crontab that is a FIFO is unknown, not silently clean.
+        self.assertEqual(rep["cron"][1]["status"], "unknown")
+        self.assertIn("cannot read: not a regular file", rep["cron"][1]["reason"])
         self.assertEqual(rep["extra"], [])
         self.assertEqual(rep["systemd"], [])
+
+
+class Pm2AndPathTest(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="nra-pm2-")
+        self.addCleanup(shutil.rmtree, self.d)
+
+    def test_relative_and_empty_path_entries_use_the_app_cwd(self):
+        node_binary(os.path.join(self.d, "app/bin/node"), "24.14.0")
+        d, _ = nra.resolve_on_path("bin:/nonexistent", cwd=os.path.join(self.d, "app"))
+        self.assertEqual(d, os.path.join(self.d, "app/bin"))
+        d, notes = nra.resolve_on_path("bin", cwd=None)
+        self.assertIsNone(d)
+        self.assertIn("no cwd", notes[0])
+
+    def test_saved_list_skips_fnm_multishell_dirs(self):
+        shell = os.path.join(self.d, "run/fnm_multishells/123_456/bin")
+        node_binary(os.path.join(shell, "node"), "24.22.1")
+        node_binary(os.path.join(self.d, "old/bin/node"), "24.14.0")
+        path = "%s:%s" % (shell, os.path.join(self.d, "old/bin"))
+        self.assertEqual(nra.resolve_on_path(path)[0], shell)
+        d, notes = nra.resolve_on_path(path, skip_ephemeral=True)
+        self.assertEqual(d, os.path.join(self.d, "old/bin"))
+        self.assertIn("does not survive a reboot", notes[0])
+
+    def test_malformed_entry_is_unknown(self):
+        for bad in ("x", {"pm2_env": "x"}, 3):
+            e = nra.pm2_entry(bad, nra.BinaryInspector(), FIXED, {}, {})
+            self.assertEqual(e["status"], "unknown")
+
+    def test_live_list_failures_are_unknown(self):
+        proc = os.path.join(self.d, "proc")
+        os.makedirs(os.path.join(proc, "77"))
+        open(os.path.join(proc, "77", "cmdline"), "wb").write(b"PM2 v6.0.14: God Daemon\0")
+        open(os.path.join(proc, "77", "stat"), "w").write("77 (PM2) S 1 1 1 0 -1\n")
+        open(os.path.join(proc, "77", "status"), "w").write("Uid:\t0\t0\t0\t0\n")
+        home = os.path.join(self.d, "pm2")
+        os.makedirs(home)
+        open(os.path.join(home, "pm2.pid"), "w").write("77\n")
+        cli = os.path.join(self.d, "pm2-cli")
+        open(cli, "w").write("#!/bin/sh\ntouch %s/RAN\necho []\n" % self.d)
+        os.chmod(cli, 0o777)
+        code, out = run(["--proc-root", proc, "--pm2-home", home, "--pm2-bin", cli, "--no-cron",
+                         "--no-systemd", "--no-containers", "--no-installs", "--json"])
+        sec = json.loads(out)["pm2"][0]
+        self.assertIn("writable by group or others (mode 777): not run", sec["error"])
+        self.assertEqual((code, sec["error_status"]), (2, "unknown"))
+        self.assertFalse(os.path.exists(os.path.join(self.d, "RAN")))
+
+    def test_stale_pid_file_does_not_start_a_daemon(self):
+        proc = os.path.join(self.d, "proc")
+        os.makedirs(os.path.join(proc, "88"))
+        open(os.path.join(proc, "88", "cmdline"), "wb").write(b"/usr/sbin/sshd\0")
+        home = os.path.join(self.d, "pm2")
+        os.makedirs(home)
+        open(os.path.join(home, "pm2.pid"), "w").write("88\n")
+        args = mock.Mock(pm2_jlist_file=None, pm2_bin="/bin/false")
+        data, err = nra.pm2_live(home, args, proc)
+        self.assertIsNone(data)
+        self.assertIn("not a pm2 daemon", err)
+
+    def test_failed_container_listing_is_unknown(self):
+        cli = os.path.join(self.d, "docker")
+        open(cli, "w").write("#!/bin/sh\necho 'permission denied' >&2\nexit 1\n")
+        os.chmod(cli, 0o755)
+        proc = os.path.join(self.d, "proc")
+        os.makedirs(proc)
+        code, out = run(["--proc-root", proc, "--container-cli", cli, "--no-pm2", "--no-cron",
+                         "--no-systemd", "--no-installs", "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("permission denied", json.loads(out)["containers"]["errors"][0])
 
 
 class CleanTest(unittest.TestCase):
@@ -607,12 +700,22 @@ class InstallsTest(unittest.TestCase):
             os.makedirs(os.path.join(fnm, "aliases"))
             os.symlink(os.path.join(fnm, "node-versions/v22.23.4/installation"),
                        os.path.join(fnm, "aliases/default"))
+            # An old binary in a directory named after a fixed version
+            node_binary(os.path.join(home, ".nvm/versions/node/v26.12.1/bin/node"), "26.11.0")
             with mock.patch.dict(os.environ, {"NVM_DIR": "", "FNM_DIR": ""}):
-                managers, _ = nra.installed_versions([home], FIXED)
+                managers, _ = nra.installed_versions([home], FIXED, nra.BinaryInspector())
             m = {x["manager"]: x for x in managers}
             self.assertEqual((m["nvm"]["default"], m["nvm"]["default_status"]), ("v24.14.0", "vulnerable"))
-            self.assertEqual([v["status"] for v in m["nvm"]["versions"]], ["vulnerable", "patched"])
+            self.assertEqual([(v["version"], v["status"]) for v in m["nvm"]["versions"]],
+                             [("v24.14.0", "vulnerable"), ("v24.22.1", "patched"),
+                              ("v26.11.0", "vulnerable")])
             self.assertEqual((m["fnm"]["default"], m["fnm"]["default_status"]), ("v22.23.4", "patched"))
+            # A default that names a version that is not installed
+            open(os.path.join(home, ".nvm/alias/default"), "w").write("v24.30.0\n")
+            with mock.patch.dict(os.environ, {"NVM_DIR": "", "FNM_DIR": ""}):
+                managers, _ = nra.installed_versions([home], FIXED, nra.BinaryInspector())
+            m = {x["manager"]: x for x in managers}
+            self.assertEqual(m["nvm"]["default_status"], "missing")
         finally:
             shutil.rmtree(home)
 

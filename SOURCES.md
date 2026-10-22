@@ -66,7 +66,7 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 ## Release lines and images
 
 - Node release schedule ([nodejs/Release schedule.json](https://github.com/nodejs/Release/blob/main/schedule.json)): v20 ended 2026-04-30, v25 ended 2026-06-01; v22 ends 2027-04-30, v24 ends 2028-04-30; v26 becomes LTS on 2026-10-28.
-- docker-library/official-images commit 74ff70c42b, "Node: feat: Node.js 22.23.4, 24.22.1, 26.12.1", at 2026-10-21T10:48:56Z. The `library/node` file no longer lists tags for 20 or 25.
+- docker-library/official-images commit 74ff70c42b, "Node: feat: Node.js 22.23.4, 24.22.1, 26.12.1", committed at 2026-10-21T10:48:56Z. The `library/node` file no longer lists tags for 20 or 25.
 - Our scan of 24 official `node` tags for linux/amd64 and linux/arm64, from registry metadata only: `results/registry-20261022T062338Z.json`, summary in `results/registry-20261022T062338Z-summary.txt`. Docker Hub's per-image `last_pushed` is metadata, not proof of when a tag first served an image.
 
 ## pm2 and nvm behavior
@@ -83,5 +83,18 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: on the Pi, `pgrep -c node` and `pgrep -c -x node` both returned 0 while five processes ran a `node` binary, named `PM2 v6.0.14: Go`, `MainThread` and `next-server (v1` in `/proc/<pid>/comm`.
 
-- `examples/run-20261022T063927Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T06:39:27Z, as a normal user.
-- The production upgrade described in the post (six Node apps under pm2, installed with nvm) was done by the team on 21 October. Its details come from that work and are generalized; the lab reproduces the pm2 behaviors on a separate machine.
+- `examples/run-20261022T065509Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T06:55:09Z, as the user that owns the Node processes. In that run the script refused to run the `pm2` CLI because the file is world-writable (mode 777), so the live pm2 list is skipped and reported as unknown.
+- On the same Pi, the first line of the app's `node_modules/.bin/next` is `#!/usr/bin/env node` (checked with `head -1`), which is why `bun run dev` ends up starting Node processes.
+- The fnm `default` alias on the Pi was changed to v24.22.1 at 06:03 UTC on 22 October (the symlink's mtime); the pm2 daemon kept running v24.14.0.
+
+## Reported by the team, not reproduced here
+
+The production upgrade in the post was done on 21 October on a small box running six Node apps under pm2, installed with nvm. These details come from that work and are generalized (no hosts, users or products named):
+
+- nvm installed the new version next to the old one, and the old one was kept for rollback.
+- Several pm2 entries had the old Node binary as an absolute interpreter path, and npm/npx scripts under the old version's `bin` directory; they were deleted and recreated. Entries with a bare `node` interpreter moved after `pm2 restart <name> --update-env` from a shell with the new Node first in `PATH`.
+- The pm2 systemd unit had the old version's `PATH` and pm2 path hard-coded; after editing it, `pm2 update` moved the daemon and restarted every app, and the sites were down for under a minute while the Next.js apps started.
+- Checking `/proc/<pid>/exe` found child processes (`npx` to `tsx` to `node`, `npm start` to `next-server`) that each needed checking.
+- Cron jobs and helper scripts on two other boxes had absolute paths to the old Node.
+
+The lab (`lab/pm2-pin-lab.sh`) reproduces the pm2 behaviors on a separate machine. It measures the duration of the `pm2 update` command, not service availability.
