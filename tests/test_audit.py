@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import unittest
@@ -501,6 +502,88 @@ class ExecVersionTest(unittest.TestCase):
         info = nra.BinaryInspector().inspect(p, install_path=p, exec_path=p)
         self.assertIsNone(info["version"])
         self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
+
+
+class FifoTest(unittest.TestCase):
+    """A FIFO planted where a file is expected must not stall the audit."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="nra-fifo-")
+        self.addCleanup(shutil.rmtree, self.d)
+
+        def blocked(*_):
+            raise AssertionError("the audit blocked on a FIFO")
+
+        old = signal.signal(signal.SIGALRM, blocked)
+        self.addCleanup(signal.signal, signal.SIGALRM, old)
+        signal.alarm(20)
+        self.addCleanup(signal.alarm, 0)
+
+    def install(self, header):
+        """bin/node without an embedded version, and node_version.h as given."""
+        root = os.path.join(self.d, "node-v24.22.1")
+        node = os.path.join(root, "bin", "node")
+        script_binary(node, "v24.22.1")
+        h = os.path.join(root, "include", "node", "node_version.h")
+        os.makedirs(os.path.dirname(h))
+        if header == "fifo":
+            os.mkfifo(h)
+        else:
+            open(h, "w").write("#define NODE_MAJOR_VERSION 24\n#define NODE_MINOR_VERSION 22\n"
+                               "#define NODE_PATCH_VERSION 1\n")
+            os.chmod(h, header)
+        return node
+
+    def test_fifo_header_is_refused(self):
+        node = self.install("fifo")
+        info = nra.BinaryInspector().inspect(node, install_path=node)
+        self.assertIsNone(info["version"])
+        self.assertIn("not a regular file", info["header_refused"])
+        self.assertEqual(nra.judge_binary(info, FIXED)[0], "unknown")
+
+    def test_header_writable_by_others_is_refused(self):
+        node = self.install(0o666)
+        info = nra.BinaryInspector().inspect(node, install_path=node)
+        self.assertIsNone(info["version"])
+        self.assertIn("writable by others", info["header_refused"])
+
+    def test_good_header_is_used(self):
+        node = self.install(0o644)
+        info = nra.BinaryInspector().inspect(node, install_path=node)
+        self.assertEqual((info["version"], info["method"]), ("v24.22.1", "node_version.h"))
+
+    def test_fifos_in_config_paths_do_not_block(self):
+        proc = os.path.join(self.d, "proc")
+        os.makedirs(proc)
+        fifo_node = os.path.join(self.d, "fifo/versions/node/v24.1.0/bin/node")
+        os.makedirs(os.path.dirname(fifo_node))
+        os.mkfifo(fifo_node)
+        crontab = os.path.join(self.d, "crontab")
+        open(crontab, "w").write("* * * * * %s /srv/job.js\n" % fifo_node)
+        cron_fifo = os.path.join(self.d, "crontab-fifo")
+        os.mkfifo(cron_fifo)
+        scan = os.path.join(self.d, "scripts")
+        os.makedirs(scan)
+        os.mkfifo(os.path.join(scan, "job.sh"))
+        units = os.path.join(self.d, "units")
+        os.makedirs(units)
+        os.mkfifo(os.path.join(units, "app.service"))
+        pm2 = os.path.join(self.d, "pm2")
+        os.makedirs(pm2)
+        os.mkfifo(os.path.join(pm2, "pm2.pid"))
+        os.mkfifo(os.path.join(pm2, "dump.pm2"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out = run(["--proc-root", proc, "--crontab-file", crontab, "--crontab-file", cron_fifo,
+                             "--scan-path", scan, "--systemd-dir", units, "--pm2-home", pm2,
+                             "--no-containers", "--no-installs", "--json"])
+        rep = json.loads(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(rep["cron"][0]["status"], "unknown")
+        self.assertIn("not a regular file", rep["cron"][0]["reason"])
+        self.assertIn("cannot read", err.getvalue())
+        self.assertEqual(rep["extra"], [])
+        self.assertEqual(rep["systemd"], [])
 
 
 class CleanTest(unittest.TestCase):

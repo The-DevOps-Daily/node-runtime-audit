@@ -20,6 +20,7 @@ Standard library only, Python 3.8+. MIT licensed.
 """
 
 import argparse
+import errno
 import glob
 import json
 import mmap
@@ -74,6 +75,61 @@ def clean_tree(obj):
     if isinstance(obj, tuple):
         return tuple(clean_tree(x) for x in obj)
     return obj
+
+
+# ---------------------------------------------------------------- safe reads
+
+MAX_READ = 4 << 20  # config files, unit files, scripts
+
+
+def safe_open(path, follow_magic=False):
+    """Open a file someone else may control without blocking on it.
+
+    Symlinks are resolved first and the real path is opened with O_NOFOLLOW,
+    O_NONBLOCK and O_CLOEXEC, after an lstat that must show a regular file;
+    fstat must then show the same regular file. A FIFO, socket or device
+    planted where a file is expected is refused instead of stalling the
+    audit. follow_magic is for /proc/<pid>/exe, a kernel link that has to be
+    followed; it is still opened non-blocking and must be a regular file.
+    Returns (fd, stat)."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+    if follow_magic:
+        fd = os.open(path, flags)
+        expect = None
+    else:
+        real = os.path.realpath(path)
+        lst = os.lstat(real)
+        if not stat.S_ISREG(lst.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+        fd = os.open(real, flags | os.O_NOFOLLOW)
+        expect = (lst.st_dev, lst.st_ino)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+        if expect and (st.st_dev, st.st_ino) != expect:
+            raise OSError(errno.EAGAIN, "file changed while opening", path)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd, st
+
+
+def safe_read(path, limit=MAX_READ, binary=False):
+    """Read at most `limit` bytes of a regular file (see safe_open)."""
+    fd, _ = safe_open(path)
+    try:
+        chunks, size = [], 0
+        while size < limit:
+            chunk = os.read(fd, min(65536, limit - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    return data if binary else data.decode("utf-8", "replace")
 
 
 # ---------------------------------------------------------------- versions
@@ -156,35 +212,39 @@ class BinaryInspector:
         self.exec_version = exec_version
         self.cache = {}
 
-    def inspect(self, path, install_path=None, exec_path=None, expect=None):
-        """path: the file to read. install_path: the binary's path in its
-        install, for node_version.h (None to skip). exec_path: the file to
-        run with --exec-version. expect: (st_dev, st_ino) exec_path must have."""
+    def inspect(self, path, install_path=None, exec_path=None, magic=False):
+        """path: the file to read; magic=True for /proc/<pid>/exe.
+        install_path: the binary's path in its install, for node_version.h
+        (None to skip). exec_path: the file to run with --exec-version."""
         try:
             st = os.stat(path)
         except OSError as e:
             return {"version": None, "method": None, "error": e.strerror, "shared": []}
         key = (st.st_dev, st.st_ino, install_path, bool(exec_path and self.exec_version))
         if key not in self.cache:
-            self.cache[key] = self._inspect(path, install_path, exec_path,
-                                            expect or (st.st_dev, st.st_ino))
+            self.cache[key] = self._inspect(path, install_path, exec_path, magic)
         return self.cache[key]
 
-    def _inspect(self, path, install_path, exec_path, expect):
+    def _inspect(self, path, install_path, exec_path, magic):
         info = {"version": None, "method": None, "error": None, "shared": []}
         embedded = set()
+        expect, owner = None, None
         try:
-            with open(path, "rb") as f:
-                size = os.fstat(f.fileno()).st_size
-                if size:
-                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            fd, st = safe_open(path, follow_magic=magic)
+            expect, owner = (st.st_dev, st.st_ino), st.st_uid
+            try:
+                if st.st_size:
+                    with mmap.mmap(fd, 0, access=mmap.ACCESS_READ) as mm:
                         for m in EMBEDDED_RE.finditer(mm):
                             embedded.add("v" + m.group(1).decode())
                         for lib in (b"libnode.so", b"libbrotlidec.so"):
                             if mm.find(lib) != -1:
                                 info["shared"].append(lib.decode())
+            finally:
+                os.close(fd)
         except (OSError, ValueError) as e:
             info["error"] = getattr(e, "strerror", None) or str(e)
+            return info
         found, method = None, None
         if len(embedded) > 1:
             info["error"] = "several versions embedded: %s" % ", ".join(sorted(embedded))
@@ -192,8 +252,10 @@ class BinaryInspector:
         if embedded:
             found, method = embedded.pop(), "embedded"
         elif install_path:
-            found = header_version(install_path)
+            found, why = header_version(install_path, owner)
             method = "node_version.h" if found else None
+            if why:
+                info["header_refused"] = why
         executed = None
         if exec_path and self.exec_version:
             executed, why = exec_version_hardened(exec_path, expect)
@@ -209,21 +271,30 @@ class BinaryInspector:
         return info
 
 
-def header_version(binary_path):
-    """Version from include/node/node_version.h next to bin/node."""
+def header_version(binary_path, binary_owner):
+    """Version from include/node/node_version.h next to bin/node, only when
+    the header is a regular file with the binary's owner that nobody else can
+    write. Returns (version or None, reason it was refused or None)."""
     root = os.path.dirname(os.path.dirname(binary_path))
+    header = os.path.join(root, "include", "node", "node_version.h")
+    if not os.path.lexists(header):
+        return None, None
     try:
-        with open(os.path.join(root, "include", "node", "node_version.h"), "r",
-                  errors="replace") as f:
-            text = f.read(65536)
-    except OSError:
-        return None
+        fd, st = safe_open(header)
+    except OSError as e:
+        return None, "node_version.h refused: %s" % (e.strerror or e)
+    try:
+        if st.st_uid != binary_owner or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return None, "node_version.h refused: other owner than the binary, or writable by others"
+        text = os.read(fd, 65536).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
     parts = dict(HEADER_RE.findall(text))
     if not all(k in parts for k in ("MAJOR", "MINOR", "PATCH")):
-        return None
+        return None, None
     v = "v%s.%s.%s" % (parts["MAJOR"], parts["MINOR"], parts["PATCH"])
     rel = IS_RELEASE_RE.search(text)
-    return v + "-pre" if rel and rel.group(1) == "0" else v
+    return (v + "-pre" if rel and rel.group(1) == "0" else v), None
 
 
 def trusted_owner_ok(st, me):
@@ -285,6 +356,8 @@ def judge_binary(info, fixed, name_hint=None):
         reason = info["error"]
     if not info.get("version") and name_hint:
         reason += "; the directory name says %s, which is not proof" % name_hint
+    if not info.get("version") and info.get("header_refused"):
+        reason += "; %s" % info["header_refused"]
     if not info.get("version") and info.get("exec_refused"):
         reason += "; --exec-version refused: %s" % info["exec_refused"]
     if info.get("shared"):
@@ -299,7 +372,8 @@ def judge_binary(info, fixed, name_hint=None):
 
 # ---------------------------------------------------------------- processes
 
-def read(path, mode="r"):
+def read_proc(path, mode="r"):
+    """Read a procfs file (kernel-generated; never user-controlled)."""
     with open(path, mode) as f:
         return f.read()
 
@@ -312,7 +386,7 @@ def proc_table(proc_root):
             continue
         base = os.path.join(proc_root, name)
         try:
-            raw = read(os.path.join(base, "stat"))
+            raw = read_proc(os.path.join(base, "stat"))
             close = raw.rfind(")")
             comm = raw[raw.find("(") + 1:close]
             ppid = int(raw[close + 2:].split()[1])
@@ -320,7 +394,7 @@ def proc_table(proc_root):
             continue
         uid = None
         try:
-            for line in read(os.path.join(base, "status")).splitlines():
+            for line in read_proc(os.path.join(base, "status")).splitlines():
                 if line.startswith("Uid:"):
                     uid = int(line.split()[1])
                     break
@@ -360,7 +434,7 @@ def scan_processes(proc_root, inspector, fixed, table):
         base = os.path.join(proc_root, str(pid))
         try:
             argv = [a.decode("utf-8", "replace")
-                    for a in read(os.path.join(base, "cmdline"), "rb").split(b"\0") if a]
+                    for a in read_proc(os.path.join(base, "cmdline"), "rb").split(b"\0") if a]
         except OSError:
             argv = []
         try:
@@ -393,7 +467,7 @@ def scan_processes(proc_root, inspector, fixed, table):
         own = not deleted and not foreign and same_file(path, os.path.join(base, "exe"))
         info = dict(inspector.inspect(os.path.join(base, "exe"),
                                       install_path=path if own else None,
-                                      exec_path=path if own else None))
+                                      exec_path=path if own else None, magic=True))
         deleted_libs, shared_libs = mapped_libs(base)
         info["shared"] = sorted(set(info.get("shared") or []) | set(shared_libs))
         status, reason = judge_binary(info, fixed, pinned_version(path))
@@ -423,7 +497,7 @@ def same_file(a, b):
 def mapped_libs(base):
     """(replaced libraries still mapped, system libnode/libbrotlidec mapped)."""
     try:
-        lines = read(os.path.join(base, "maps")).splitlines()
+        lines = read_proc(os.path.join(base, "maps")).splitlines()
     except OSError:
         return [], []
     deleted, shared = set(), set()
@@ -547,7 +621,7 @@ def crontab_sources(args):
     if args.crontab_file:
         for f in args.crontab_file:
             try:
-                sources.append((f, read(f)))
+                sources.append((f, safe_read(f)))
             except OSError as e:
                 sources.append((f, ""))
                 print("note: cannot read %s: %s" % (clean(f), e.strerror), file=sys.stderr)
@@ -566,7 +640,7 @@ def crontab_sources(args):
         for f in sorted(glob.glob(pat)):
             if os.path.isfile(f):
                 try:
-                    sources.append((f, read(f)))
+                    sources.append((f, safe_read(f)))
                 except (OSError, UnicodeDecodeError):
                     pass
     return sources
@@ -586,13 +660,13 @@ def systemd_sources(dirs):
                 if not os.path.isfile(f):
                     continue
                 try:
-                    sources.append((f, read(f)))
+                    sources.append((f, safe_read(f)))
                 except (OSError, UnicodeDecodeError):
                     pass
     if os.geteuid() == 0:
         for f in sorted(glob.glob("/home/*/.config/systemd/user/*.service")):
             try:
-                sources.append((f, read(f)))
+                sources.append((f, safe_read(f)))
             except (OSError, UnicodeDecodeError):
                 pass
     # A unit can be listed twice through symlinks; keep the first.
@@ -617,10 +691,10 @@ def extra_sources(paths):
             files += [os.path.join(dirpath, f) for f in filenames]
         for f in sorted(files):
             try:
-                if os.path.getsize(f) > 1 << 20:
-                    continue
-                data = read(f, "rb")
+                data = safe_read(f, limit=(1 << 20) + 1, binary=True)
             except OSError:
+                continue
+            if len(data) > 1 << 20:
                 continue
             if b"\0" in data[:4096]:
                 continue
@@ -680,7 +754,10 @@ def installed_versions(homes, fixed):
                     if os.path.islink(a):
                         default = pinned_version(os.path.realpath(a))
                     elif os.path.isfile(a):
-                        raw = read(a).strip()
+                        try:
+                            raw = safe_read(a, limit=4096).strip()
+                        except OSError:
+                            raw = "unreadable"
                         default = raw if VERSION_RE.match(raw) else "alias %r" % raw
                 versions = []
                 for b in bins:
@@ -802,9 +879,9 @@ def pm2_live(home, args, proc_root):
     (jlist would otherwise start one). Never for other users: the CLI would
     leave root-owned files in their PM2_HOME."""
     if args.pm2_jlist_file:
-        return load_json_list(read(args.pm2_jlist_file)), None
+        return load_json_list(safe_read(args.pm2_jlist_file, limit=64 << 20)), None
     try:
-        dpid = int(read(os.path.join(home, "pm2.pid")).strip())
+        dpid = int(safe_read(os.path.join(home, "pm2.pid"), limit=64).strip())
     except (OSError, ValueError):
         return None, "no daemon pid file"
     if not os.path.exists(os.path.join(proc_root, str(dpid))):
@@ -829,7 +906,7 @@ def pm2_live(home, args, proc_root):
 
 def pm2_daemon(home, proc_root, procs_by_pid):
     try:
-        dpid = int(read(os.path.join(home, "pm2.pid")).strip())
+        dpid = int(safe_read(os.path.join(home, "pm2.pid"), limit=64).strip())
     except (OSError, ValueError):
         return None
     return procs_by_pid.get(dpid) or ({"pid": dpid, "status": "unknown",
@@ -1051,7 +1128,7 @@ def build_report(args):
             dump = args.pm2_dump_file or os.path.join(home, "dump.pm2")
             if os.path.isfile(dump):
                 try:
-                    saved = load_json_list(read(dump))
+                    saved = load_json_list(safe_read(dump, limit=64 << 20))
                 except OSError as e:
                     saved, notes_err = None, e.strerror
                 sec = {"kind": "saved list", "source": "%s, what a reboot or pm2 resurrect starts" % dump,
