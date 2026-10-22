@@ -16,6 +16,10 @@
       "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
       "deleted": false,
       "container": false,
+      "inode": [
+        45826,
+        291370
+      ],
       "version": "v24.14.0",
       "method": "embedded",
       "status": "vulnerable",
@@ -33,6 +37,10 @@
       "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
       "deleted": false,
       "container": false,
+      "inode": [
+        45826,
+        291370
+      ],
       "version": "v24.14.0",
       "method": "embedded",
       "status": "vulnerable",
@@ -52,6 +60,10 @@
       "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
       "deleted": false,
       "container": false,
+      "inode": [
+        45826,
+        291370
+      ],
       "version": "v24.14.0",
       "method": "embedded",
       "status": "vulnerable",
@@ -72,6 +84,10 @@
       "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
       "deleted": false,
       "container": false,
+      "inode": [
+        45826,
+        291370
+      ],
       "version": "v24.14.0",
       "method": "embedded",
       "status": "vulnerable",
@@ -86,7 +102,7 @@
       ]
     }
   ],
-  "hidden": 177,
+  "hidden": 174,
   "pm2": [
     {
       "kind": "live list",
@@ -99,6 +115,10 @@
         "exe": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
         "deleted": false,
         "container": false,
+        "inode": [
+          45826,
+          291370
+        ],
         "version": "v24.14.0",
         "method": "embedded",
         "status": "vulnerable",
@@ -112,35 +132,6 @@
       "error_status": "unknown",
       "error_text": "pm2 CLI /home/USER/.bun/bin/pm2 is writable by group or others (mode 777): not run, live list skipped",
       "entries": []
-    },
-    {
-      "kind": "saved list",
-      "source": "/home/USER/.pm2/dump.pm2, what a reboot or pm2 resurrect starts",
-      "error": null,
-      "error_status": null,
-      "entries": [
-        {
-          "name": "app-1",
-          "status_pm2": "online",
-          "pid": null,
-          "cluster": false,
-          "interpreter": "none",
-          "script": "/home/USER/.bun/bin/bun",
-          "findings": [
-            {
-              "path": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin",
-              "node": "/home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node",
-              "pinned": true,
-              "version": "v24.14.0",
-              "status": "vulnerable",
-              "reason": "v24.14.0 < v24.22.1",
-              "what": "PATH node"
-            }
-          ],
-          "running": [],
-          "status": "vulnerable"
-        }
-      ]
     }
   ],
   "containers": {
@@ -156,28 +147,33 @@
         "versions": [
           {
             "version": "v24.14.0",
+            "source": "running",
             "status": "vulnerable"
           },
           {
             "version": "v24.14.1",
+            "source": "from path",
             "status": "vulnerable"
           },
           {
             "version": "v24.22.1",
-            "status": "patched"
+            "source": "from path",
+            "status": "unknown"
           }
         ],
-        "default": "v24.22.1",
-        "default_status": "patched",
-        "default_reason": "v24.22.1 >= v24.22.1"
+        "default": {
+          "version": "v24.22.1",
+          "source": "from path",
+          "status": "unknown"
+        }
       }
     ],
     "shell": {
-      "path": "/run/user/UID/fnm_multishells/2111_1791366850230/bin/node",
-      "real": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
       "version": "v24.22.1",
-      "status": "patched",
-      "reason": "v24.22.1 >= v24.22.1"
+      "source": "from path",
+      "status": "unknown",
+      "path": "/run/user/UID/fnm_multishells/2111_1791366850230/bin/node",
+      "real": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node"
     }
   },
   "cron": [
@@ -186,8 +182,9 @@
       "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
       "pinned": true,
       "version": "v24.22.1",
-      "status": "patched",
-      "reason": "v24.22.1 >= v24.22.1",
+      "from_path": true,
+      "status": "unknown",
+      "reason": "from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)",
       "where": "crontab -l (USER):33"
     },
     {
@@ -195,8 +192,9 @@
       "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
       "pinned": true,
       "version": "v24.22.1",
-      "status": "patched",
-      "reason": "v24.22.1 >= v24.22.1",
+      "from_path": true,
+      "status": "unknown",
+      "reason": "from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)",
       "where": "crontab -l (USER):53"
     }
   ],
@@ -206,8 +204,9 @@
       "node": "/home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node",
       "pinned": true,
       "version": "v24.22.1",
-      "status": "patched",
-      "reason": "v24.22.1 >= v24.22.1",
+      "from_path": true,
+      "status": "unknown",
+      "reason": "from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)",
       "where": "/etc/systemd/system/pm2-USER.service:12",
       "unit_state": {
         "unit": "pm2-USER.service",

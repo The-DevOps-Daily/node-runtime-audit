@@ -1,0 +1,5 @@
+# 2026-10-22T07:05:04Z
+# saved list: /home/USER/.pm2/dump.pm2
+app-1  saved PATH starts with node in: /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin
+# processes the pm2 daemon started (PATH from /proc/<pid>/environ)
+pid 1883370 (child of the pm2 daemon) PATH starts with node in: /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin

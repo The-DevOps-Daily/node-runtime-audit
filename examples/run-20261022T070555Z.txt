@@ -1,4 +1,4 @@
-# 2026-10-22T06:55:09Z Raspberry Pi (Debian 12, aarch64), Node via fnm, pm2 6.0.14, run as the user that owns the Node processes
+# 2026-10-22T07:05:55Z Raspberry Pi (Debian 12, aarch64), Node via fnm, pm2 6.0.14, run as the user that owns the Node processes
 $ python3 node_runtime_audit.py --redact
 node-runtime-audit: Node.js security release of 2026-10-21, fixed releases v22.23.4, v24.22.1, v26.12.1
 lines without a fix (end-of-life) count as vulnerable
@@ -21,35 +21,31 @@ Running Node processes (real binary from /proc/<pid>/exe)
       cmd: node /home/USER/projects/app-1/.next/dev/build/postcss.js 38963
       parents: node(1883390) <- node(1883371) <- bun(1883370) <- node(1883303)
       why: v24.14.0 < v24.22.1
-  177 processes of other users not inspected: run the script as their owner
+  174 processes of other users not inspected: run the script as their owner
 
 pm2 live list (pm2 jlist, PM2_HOME=/home/USER/.pm2)
   [unknown]     pm2 CLI /home/USER/.bun/bin/pm2 is writable by group or others (mode 777): not run, live list skipped
   [vulnerable]  daemon pid 1883303 v24.14.0 /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin/node
 
-pm2 saved list (/home/USER/.pm2/dump.pm2, what a reboot or pm2 resurrect starts)
-  [vulnerable]  app-1  online
-      interpreter: none
-      script:      /home/USER/.bun/bin/bun
-      PATH node:   v24.14.0  /home/USER/.local/share/fnm/node-versions/v24.14.0/installation/bin  (pinned)
-          vulnerable: v24.14.0 < v24.22.1
-
 Installed Node versions (version managers)
   fnm in /home/USER/.local/share/fnm
-      installed: v24.14.0 (vulnerable), v24.14.1 (vulnerable), v24.22.1 (patched)
-      [patched]     default alias -> v24.22.1
-  [patched]     `node` on this shell's PATH -> v24.22.1 /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node
-  old installs are fine to keep for rollback; they matter when something above points at them
+      installed: v24.14.0 (running), v24.14.1 (from path), v24.22.1 (from path)
+      default alias -> v24.22.1 (from path)
+  `node` on this shell's PATH -> v24.22.1 (from path) /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node
+  for information only: these do not change the exit code
 
-Crontabs: absolute Node paths
-  [patched]     crontab -l (USER):33
-      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node -> v24.22.1  (pinned to one install)
-  [patched]     crontab -l (USER):53
-      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node -> v24.22.1  (pinned to one install)
+Crontab: absolute Node paths
+  [unknown]     crontab -l (USER):33
+      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node -> v24.22.1 (from path)  (pinned to one install)
+      why: from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)
+  [unknown]     crontab -l (USER):53
+      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin/node -> v24.22.1 (from path)  (pinned to one install)
+      why: from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)
 
 systemd units: absolute Node paths
-  [patched]     /etc/systemd/system/pm2-USER.service:12
-      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin -> v24.22.1  (pinned to one install)
+  [unknown]     /etc/systemd/system/pm2-USER.service:12
+      /home/USER/.local/share/fnm/node-versions/v24.22.1/installation/bin -> v24.22.1 (from path)  (pinned to one install)
+      why: from path: v24.22.1 (a hint, not proof: binaries outside /proc are not read)
       unit: pm2-USER.service ActiveState=inactive MainPID=0
       note: the unit is not what runs pm2 now; its PATH applies at the next boot
 

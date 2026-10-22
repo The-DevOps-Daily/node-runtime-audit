@@ -83,7 +83,8 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: on the Pi, `pgrep -c node` and `pgrep -c -x node` both returned 0 while five processes ran a `node` binary, named `PM2 v6.0.14: Go`, `MainThread` and `next-server (v1` in `/proc/<pid>/comm`.
 
-- `examples/run-20261022T065509Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T06:55:09Z, as the user that owns the Node processes. In that run the script refused to run the `pm2` CLI because the file is world-writable (mode 777), so the live pm2 list is skipped and reported as unknown.
+- `examples/run-20261022T070555Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T07:05:55Z, as the user that owns the Node processes. The script refused to run the `pm2` CLI because the file is world-writable (mode 777), so the live pm2 list is skipped and reported as unknown.
+- `results/pm2-path-20261022T070504Z.txt`: on the same Pi, the saved pm2 list (`dump.pm2`) and the process the pm2 daemon started (`/proc/<pid>/environ`) both have the v24.14.0 install first on `PATH`.
 - On the same Pi, the first line of the app's `node_modules/.bin/next` is `#!/usr/bin/env node` (checked with `head -1`), which is why `bun run dev` ends up starting Node processes.
 - The fnm `default` alias on the Pi was changed to v24.22.1 at 06:03 UTC on 22 October (the symlink's mtime); the pm2 daemon kept running v24.14.0.
 
