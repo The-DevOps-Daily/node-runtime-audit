@@ -11,7 +11,8 @@ It looks at:
   3. absolute Node paths in crontabs, systemd units and any extra paths
   4. `node --version` inside running Docker or Podman containers
 
-It only reads. It never restarts, edits or upgrades anything. Exit code: 1 if
+It only reads. It never restarts, edits or upgrades anything, and it does not
+run the binaries it finds unless you pass --exec-version. Exit code: 1 if
 anything is vulnerable, else 2 if anything is unknown, else 0. Unknown is never
 reported as patched.
 
@@ -46,8 +47,33 @@ PINNED_RE = re.compile(r"(?:^|/)(?:node-)?v?(\d+\.\d+\.\d+)(?:-[a-z0-9_-]+)?(?:/
 ABS_PATH_RE = re.compile(r"/[A-Za-z0-9._@+%~/-]+")
 FNM_MULTISHELL_RE = re.compile(r"/fnm_multishells/")
 
+# C0 controls, DEL and C1 controls. Process names, command lines, file names
+# and container names come from other users and containers; printed raw they
+# could move the cursor, rewrite the screen or set the terminal title.
+CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
+
 STATUS_ORDER = {"vulnerable": 3, "unknown": 2, "missing": 2, "patched": 1, "none": 0}
 EXIT_FOR = {"vulnerable": 1, "unknown": 2, "missing": 2, "patched": 0, "none": 0}
+
+
+# ---------------------------------------------------------------- output safety
+
+def clean(text):
+    """Escape control characters as \\xNN so nothing can reach the terminal raw."""
+    return CONTROL_RE.sub(lambda m: "\\x%02x" % ord(m.group(0)), text)
+
+
+def clean_tree(obj):
+    """clean() every string in a report, keys included."""
+    if isinstance(obj, str):
+        return clean(obj)
+    if isinstance(obj, dict):
+        return {clean_tree(k): clean_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [clean_tree(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(clean_tree(x) for x in obj)
+    return obj
 
 
 # ---------------------------------------------------------------- versions
@@ -108,28 +134,43 @@ def pinned_version(path):
 
 # ---------------------------------------------------------------- binaries
 
-class BinaryInspector:
-    """Reads the version of a Node binary. The embedded headers URL is read
-    from the file itself, so it works for deleted binaries (through
-    /proc/<pid>/exe) and for binaries inside containers. `--version` is run
-    only on files that only root or the current user can change, and both
-    results must agree."""
+HEADER_RE = re.compile(r"^#define\s+NODE_(MAJOR|MINOR|PATCH)_VERSION\s+(\d+)\s*$", re.M)
+IS_RELEASE_RE = re.compile(r"^#define\s+NODE_VERSION_IS_RELEASE\s+(\d+)\s*$", re.M)
 
-    def __init__(self, allow_exec=True):
-        self.allow_exec = allow_exec
+
+class BinaryInspector:
+    """Reads the version of a Node binary without running it.
+
+    1. embedded: the headers URL compiled into official builds, read from the
+       file itself. For processes the file is opened through /proc/<pid>/exe,
+       which is the inode the process runs, even when it was deleted or lives
+       in a container.
+    2. node_version.h: include/node/node_version.h of the install the binary
+       sits in, used only when the binary carries no embedded string.
+    3. --version: only with --exec-version, through exec_version_hardened().
+
+    A version that only a directory name gives is a hint and stays unknown.
+    """
+
+    def __init__(self, exec_version=False):
+        self.exec_version = exec_version
         self.cache = {}
 
-    def inspect(self, path, exec_path=None):
+    def inspect(self, path, install_path=None, exec_path=None, expect=None):
+        """path: the file to read. install_path: the binary's path in its
+        install, for node_version.h (None to skip). exec_path: the file to
+        run with --exec-version. expect: (st_dev, st_ino) exec_path must have."""
         try:
             st = os.stat(path)
         except OSError as e:
             return {"version": None, "method": None, "error": e.strerror, "shared": []}
-        key = (st.st_dev, st.st_ino)
+        key = (st.st_dev, st.st_ino, install_path, bool(exec_path and self.exec_version))
         if key not in self.cache:
-            self.cache[key] = self._inspect(path, exec_path)
+            self.cache[key] = self._inspect(path, install_path, exec_path,
+                                            expect or (st.st_dev, st.st_ino))
         return self.cache[key]
 
-    def _inspect(self, path, exec_path):
+    def _inspect(self, path, install_path, exec_path, expect):
         info = {"version": None, "method": None, "error": None, "shared": []}
         embedded = set()
         try:
@@ -144,53 +185,108 @@ class BinaryInspector:
                                 info["shared"].append(lib.decode())
         except (OSError, ValueError) as e:
             info["error"] = getattr(e, "strerror", None) or str(e)
-        executed = None
-        if exec_path and self.allow_exec and safe_to_exec(exec_path):
-            executed = run_version([exec_path, "--version"])
+        found, method = None, None
         if len(embedded) > 1:
             info["error"] = "several versions embedded: %s" % ", ".join(sorted(embedded))
-        elif embedded and executed and embedded != {executed}:
-            info["error"] = "embedded %s but --version says %s" % (embedded.pop(), executed)
-        elif embedded:
-            info["version"] = embedded.pop()
-            info["method"] = "embedded+--version" if executed else "embedded"
+            return info
+        if embedded:
+            found, method = embedded.pop(), "embedded"
+        elif install_path:
+            found = header_version(install_path)
+            method = "node_version.h" if found else None
+        executed = None
+        if exec_path and self.exec_version:
+            executed, why = exec_version_hardened(exec_path, expect)
+            if executed is None:
+                info["exec_refused"] = why
+        if found and executed and found != executed:
+            info["error"] = "%s says %s but --version says %s" % (method, found, executed)
+            return info
+        if found:
+            info["version"], info["method"] = found, method + ("+--version" if executed else "")
         elif executed:
-            info["version"] = executed
-            info["method"] = "--version"
+            info["version"], info["method"] = executed, "--version"
         return info
 
 
-def safe_to_exec(path):
-    """Only execute binaries that nobody but root or us can replace."""
+def header_version(binary_path):
+    """Version from include/node/node_version.h next to bin/node."""
+    root = os.path.dirname(os.path.dirname(binary_path))
     try:
-        st = os.stat(path)
-        parent = os.stat(os.path.dirname(os.path.realpath(path)))
+        with open(os.path.join(root, "include", "node", "node_version.h"), "r",
+                  errors="replace") as f:
+            text = f.read(65536)
     except OSError:
-        return False
-    me = os.geteuid()
-    owners = {0} if me == 0 else {0, me}
-    for s in (st, parent):
-        if s.st_uid not in owners or s.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            return False
-    return stat.S_ISREG(st.st_mode)
-
-
-def run_version(argv, timeout=10):
-    try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                             env={"PATH": "/usr/bin:/bin", "NODE_OPTIONS": ""})
-    except (OSError, subprocess.SubprocessError):
         return None
-    line = (out.stdout or "").strip().splitlines()
-    if out.returncode == 0 and line and VERSION_RE.match(line[0].strip()):
-        return line[0].strip()
-    return None
+    parts = dict(HEADER_RE.findall(text))
+    if not all(k in parts for k in ("MAJOR", "MINOR", "PATCH")):
+        return None
+    v = "v%s.%s.%s" % (parts["MAJOR"], parts["MINOR"], parts["PATCH"])
+    rel = IS_RELEASE_RE.search(text)
+    return v + "-pre" if rel and rel.group(1) == "0" else v
 
 
-def judge_binary(info, fixed):
+def trusted_owner_ok(st, me):
+    """Root, or us when we are not root; never writable by group or others."""
+    owners = {0} if me == 0 else {0, me}
+    return st.st_uid in owners and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+
+def exec_version_hardened(path, expect=None, timeout=10):
+    """Run `<node> --version` only when nobody but root (or us, when not root)
+    can have changed the file or any directory above it. The file is pinned
+    with an O_PATH descriptor and executed through /proc/self/fd/N, so it
+    cannot be swapped between the checks and the exec. Returns (version, why)."""
+    me = os.geteuid()
+    try:
+        real = os.path.realpath(path)
+        fd = os.open(real, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except (OSError, AttributeError) as e:
+        return None, "cannot open: %s" % (getattr(e, "strerror", None) or e)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "not a regular file"
+        if expect and (st.st_dev, st.st_ino) != tuple(expect):
+            return None, "file changed since it was found"
+        if me == 0 and st.st_uid != 0:
+            return None, "running as root: refusing a binary not owned by root"
+        if not trusted_owner_ok(st, me):
+            return None, "binary owned by uid %d or writable by group/others" % st.st_uid
+        d = os.path.dirname(real)
+        while True:
+            try:
+                dst = os.stat(d)
+            except OSError as e:
+                return None, "cannot stat %s: %s" % (d, e.strerror)
+            if not trusted_owner_ok(dst, me):
+                return None, "directory %s is owned by uid %d or writable by group/others" % (
+                    d, dst.st_uid)
+            if d == "/":
+                break
+            d = os.path.dirname(d)
+        try:
+            out = subprocess.run(["/proc/self/fd/%d" % fd, "--version"], pass_fds=(fd,),
+                                 capture_output=True, text=True, timeout=timeout,
+                                 env={"PATH": "/usr/bin:/bin"}, cwd="/")
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, "exec failed: %s" % e
+        line = (out.stdout or "").strip().splitlines()
+        if out.returncode == 0 and line and VERSION_RE.match(line[0].strip()):
+            return line[0].strip(), None
+        return None, "--version gave no version"
+    finally:
+        os.close(fd)
+
+
+def judge_binary(info, fixed, name_hint=None):
     status, reason = classify(info.get("version"), fixed)
     if info.get("error") and not info.get("version"):
         reason = info["error"]
+    if not info.get("version") and name_hint:
+        reason += "; the directory name says %s, which is not proof" % name_hint
+    if not info.get("version") and info.get("exec_refused"):
+        reason += "; --exec-version refused: %s" % info["exec_refused"]
     if info.get("shared"):
         # Distribution builds link system libraries (Debian: libnode and
         # libbrotli) and backport fixes, so the upstream version decides nothing.
@@ -291,13 +387,16 @@ def scan_processes(proc_root, inspector, fixed, table):
         # Read the binary through /proc/<pid>/exe, which is the inode the
         # process runs even if the file was replaced or lives in a container.
         # Run --version only on the same file in our own mount namespace.
-        exec_path = None
-        if not deleted and not foreign and same_file(path, os.path.join(base, "exe")):
-            exec_path = path
-        info = dict(inspector.inspect(os.path.join(base, "exe"), exec_path))
+        # Read the binary through /proc/<pid>/exe: the inode the process
+        # runs. node_version.h and --exec-version only apply to the same file
+        # in our own mount namespace, never to a replaced (deleted) binary.
+        own = not deleted and not foreign and same_file(path, os.path.join(base, "exe"))
+        info = dict(inspector.inspect(os.path.join(base, "exe"),
+                                      install_path=path if own else None,
+                                      exec_path=path if own else None))
         deleted_libs, shared_libs = mapped_libs(base)
         info["shared"] = sorted(set(info.get("shared") or []) | set(shared_libs))
-        status, reason = judge_binary(info, fixed)
+        status, reason = judge_binary(info, fixed, pinned_version(path))
         notes = []
         if deleted:
             notes.append("binary was replaced on disk: this process still runs the old file")
@@ -396,8 +495,8 @@ def judge_path(path, inspector, fixed):
     node = node_for(path)
     pin = pinned_version(path)
     if os.path.exists(node):
-        info = inspector.inspect(node, node)
-        status, reason = judge_binary(info, fixed)
+        info = inspector.inspect(node, install_path=node, exec_path=node)
+        status, reason = judge_binary(info, fixed, pin or pinned_version(os.path.realpath(node)))
         version = info.get("version")
     else:
         version = pin
@@ -451,7 +550,7 @@ def crontab_sources(args):
                 sources.append((f, read(f)))
             except OSError as e:
                 sources.append((f, ""))
-                print("note: cannot read %s: %s" % (f, e.strerror), file=sys.stderr)
+                print("note: cannot read %s: %s" % (clean(f), e.strerror), file=sys.stderr)
         return sources
     if shutil.which("crontab"):
         try:
@@ -926,7 +1025,7 @@ def print_report(rep, red, out=None):
 
 def build_report(args):
     fixed = parse_fixed(args.fixed)
-    inspector = BinaryInspector(allow_exec=not args.no_exec)
+    inspector = BinaryInspector(exec_version=args.exec_version)
     notes = []
     if os.geteuid() != 0:
         notes.append("not root: only your own processes, crontab and pm2 are fully visible")
@@ -1024,7 +1123,9 @@ def main(argv=None):
                     help="hide user names, home dirs and pm2 app names (for sharing output)")
     ap.add_argument("--scan-path", action="append", default=[],
                     help="also search these files or dirs for absolute Node paths (repeatable)")
-    ap.add_argument("--no-exec", action="store_true", help="never run --version, only read binaries")
+    ap.add_argument("--exec-version", action="store_true",
+                    help="also run `node --version` on found binaries, only when root (or you, "
+                         "when not root) owns the file and every directory above it")
     ap.add_argument("--no-pm2", action="store_true")
     ap.add_argument("--no-cron", action="store_true")
     ap.add_argument("--no-systemd", action="store_true")
@@ -1041,9 +1142,9 @@ def main(argv=None):
     ap.add_argument("--systemd-dir", action="append", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     try:
-        rep = build_report(args)
+        rep = clean_tree(build_report(args))
     except ValueError as e:
-        ap.error(str(e))
+        ap.error(clean(str(e)))
     red = Redactor(args.redact)
     for p in rep["processes"]:
         red.user(p.get("user"))

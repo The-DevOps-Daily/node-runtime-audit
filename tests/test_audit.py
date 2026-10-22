@@ -35,9 +35,14 @@ def node_binary(path, version, extra=b"", mode=0o755):
     os.chmod(path, mode)
 
 
-def script_binary(path, prints, embedded=None, mode=0o755):
+def script_binary(path, prints, embedded=None, mode=0o755, marker=None):
+    """A shell script posing as node. With marker, running it creates that
+    file, so a test can prove it was never executed."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    body = "#!/bin/sh\necho %s\n" % prints
+    body = "#!/bin/sh\n"
+    if marker:
+        body += "touch '%s'\n" % marker
+    body += "echo %s\n" % prints
     if embedded:
         body += "# node-v%s-headers.tar.gz\n" % embedded
     with open(path, "w") as f:
@@ -78,8 +83,19 @@ class FakeHost:
         node_binary(os.path.join(b, "deleted/node (deleted)"), "24.14.0")
         node_binary(os.path.join(b, "container/node"), "26.12.1")
         node_binary(os.path.join(b, "brotli/node"), "24.22.1")
-        script_binary(os.path.join(b, "mismatch/node"), "v24.22.1", embedded="24.14.0")
-        script_binary(os.path.join(b, "execonly/node"), "v26.12.1")
+        self.marker = os.path.join(r, "EXECUTED")
+        script_binary(os.path.join(b, "mismatch/node"), "v24.22.1", embedded="24.14.0",
+                      marker=self.marker)
+        script_binary(os.path.join(b, "execonly/node"), "v26.12.1", marker=self.marker)
+        # No embedded string, but the install ships include/node/node_version.h
+        script_binary(os.path.join(r, "hdr/node-v24.22.1/bin/node"), "v24.22.1", marker=self.marker)
+        os.makedirs(os.path.join(r, "hdr/node-v24.22.1/include/node"))
+        open(os.path.join(r, "hdr/node-v24.22.1/include/node/node_version.h"), "w").write(
+            "#define NODE_MAJOR_VERSION 24\n#define NODE_MINOR_VERSION 22\n"
+            "#define NODE_PATCH_VERSION 1\n#define NODE_VERSION_IS_RELEASE 1\n")
+        # Only the directory name says a version: not proof
+        script_binary(os.path.join(r, "opt/node-v26.12.1-linux-arm64/bin/node"), "v26.12.1",
+                      marker=self.marker)
         node_binary(os.path.join(b, "bash"), None)
         node_binary(os.path.join(b, "systemd"), None)
 
@@ -101,6 +117,10 @@ class FakeHost:
           maps="7f00-7f01 r-xp 0 b3:02 42 /usr/lib/aarch64-linux-gnu/libbrotlidec.so.1.1.0 (deleted)\n")
         P(110, 1, "node", ["node", "mismatch.js"], os.path.join(b, "mismatch/node"))
         P(111, 1, "node", ["node", "execonly.js"], os.path.join(b, "execonly/node"))
+        P(112, 1, "node", ["node", "\x1b]0;pwned\x07evil.js", "\x1b[2J"], self.old)
+        P(113, 1, "node", ["node", "hdr.js"], os.path.join(r, "hdr/node-v24.22.1/bin/node"))
+        P(114, 1, "node", ["node", "named.js"],
+          os.path.join(r, "opt/node-v26.12.1-linux-arm64/bin/node"))
         # pm2 trees
         P(300, 1, "PM2 v6.0.14: Go", ["PM2 v6.0.14: God Daemon"], self.old)
         P(200, 300, "node", ["node", "/srv/api/server.js"], self.old)
@@ -231,7 +251,8 @@ class HostTest(unittest.TestCase):
     def test_process_statuses(self):
         want = {100: "vulnerable", 101: "patched", 102: "vulnerable", 103: "patched",
                 105: "vulnerable", 106: "unknown", 107: "unknown", 108: "unknown",
-                109: "unknown", 110: "unknown", 111: "patched", 300: "vulnerable",
+                109: "unknown", 110: "vulnerable", 111: "unknown", 112: "vulnerable",
+                113: "patched", 114: "unknown", 300: "vulnerable",
                 200: "vulnerable", 212: "patched", 240: "vulnerable"}
         for pid, status in want.items():
             self.assertEqual(self.procs[pid]["status"], status, pid)
@@ -254,12 +275,30 @@ class HostTest(unittest.TestCase):
         self.assertIn("libbrotlidec.so", self.procs[109]["reason"])
         self.assertTrue(any("libbrotlidec" in n for n in self.procs[109]["notes"]))
 
-    def test_version_disagreement_is_unknown(self):
-        self.assertIn("--version says v24.22.1", self.procs[110]["reason"])
+    def test_found_binaries_are_never_executed_by_default(self):
+        # 110, 111, 113 and 114 are scripts that would create the marker.
+        self.assertFalse(os.path.exists(self.host.marker))
+        self.assertEqual((self.procs[110]["version"], self.procs[110]["method"]),
+                         ("v24.14.0", "embedded"))
+        self.assertIsNone(self.procs[111]["version"])
+        self.assertIn("version not found", self.procs[111]["reason"])
 
-    def test_exec_only_build(self):
-        self.assertEqual(self.procs[111]["method"], "--version")
-        self.assertEqual(self.procs[111]["version"], "v26.12.1")
+    def test_version_from_install_header(self):
+        self.assertEqual((self.procs[113]["version"], self.procs[113]["method"]),
+                         ("v24.22.1", "node_version.h"))
+
+    def test_directory_name_is_not_proof(self):
+        self.assertIsNone(self.procs[114]["version"])
+        self.assertIn("directory name says v26.12.1", self.procs[114]["reason"])
+
+    def test_terminal_escapes_are_neutralized(self):
+        for out in (run(self.host.args())[1], run(self.host.args("--json"))[1],
+                    run(self.host.args("--redact"))[1]):
+            for bad in ("\x1b", "\x07", "\x9b"):
+                self.assertNotIn(bad, out)
+            self.assertIn("\\x1b]0;pwned\\x07evil.js", out.replace("\\\\", "\\"))
+        c = [x["name"] for x in self.rep["containers"]["items"]]
+        self.assertIn("evil\\x1b[2Jname", c)
 
     def test_unreadable_process_is_unknown(self):
         self.assertIn("run as root", self.procs[108]["reason"])
@@ -392,29 +431,84 @@ class ExitCodeTest(unittest.TestCase):
         self.assertIn("no Node found", out)
 
 
-class SafetyTest(unittest.TestCase):
-    def test_group_writable_binary_is_not_executed(self):
-        d = tempfile.mkdtemp()
-        try:
-            p = os.path.join(d, "node")
-            script_binary(p, "v24.22.1", embedded="24.14.0", mode=0o775)
-            os.chmod(p, 0o775)
-            self.assertFalse(nra.safe_to_exec(p))
-            info = nra.BinaryInspector().inspect(p, p)
-            self.assertEqual((info["version"], info["method"]), ("v24.14.0", "embedded"))
-        finally:
-            shutil.rmtree(d)
+class ExecVersionTest(unittest.TestCase):
+    """--exec-version is opt-in and refuses anything someone else could swap."""
 
-    def test_no_exec_flag(self):
-        d = tempfile.mkdtemp()
-        try:
-            p = os.path.join(d, "node")
-            script_binary(p, "v26.12.1")
-            info = nra.BinaryInspector(allow_exec=False).inspect(p, p)
-            self.assertIsNone(info["version"])
-            self.assertEqual(nra.judge_binary(info, FIXED)[0], "unknown")
-        finally:
-            shutil.rmtree(d)
+    def setUp(self):
+        # Under the repo, not /tmp: /tmp is world-writable, so the directory
+        # check refuses everything below it, which is the point.
+        self.d = tempfile.mkdtemp(prefix="nra-exec-", dir=HERE)
+        os.chmod(self.d, 0o755)
+        self.addCleanup(shutil.rmtree, self.d)
+        probe = os.path.join(self.d, "probe")
+        script_binary(probe, "v26.12.1")
+        version, why = nra.exec_version_hardened(probe)
+        if version is None:
+            self.skipTest("checkout path is not trusted here: %s" % why)
+
+    def test_trusted_binary_runs_through_its_fd(self):
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v26.12.1")
+        self.assertEqual(nra.exec_version_hardened(p), ("v26.12.1", None))
+
+    def test_group_writable_binary_is_refused(self):
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v26.12.1", mode=0o775, marker=os.path.join(self.d, "ran"))
+        os.chmod(p, 0o775)
+        version, why = nra.exec_version_hardened(p)
+        self.assertIsNone(version)
+        self.assertIn("writable by group/others", why)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
+
+    def test_writable_directory_is_refused(self):
+        sub = os.path.join(self.d, "open")
+        p = os.path.join(sub, "node")
+        script_binary(p, "v26.12.1")
+        os.chmod(sub, 0o777)
+        version, why = nra.exec_version_hardened(p)
+        self.assertIsNone(version)
+        self.assertIn("directory %s" % sub, why)
+
+    def test_root_refuses_binaries_it_does_not_own(self):
+        if os.geteuid() == 0:
+            self.skipTest("needs a non-root owner")
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v26.12.1", marker=os.path.join(self.d, "ran"))
+        with mock.patch.object(nra.os, "geteuid", return_value=0):
+            version, why = nra.exec_version_hardened(p)
+        self.assertIsNone(version)
+        self.assertIn("not owned by root", why)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
+
+    def test_swapped_file_is_refused(self):
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v26.12.1")
+        version, why = nra.exec_version_hardened(p, expect=(0, 0))
+        self.assertIsNone(version)
+        self.assertIn("changed", why)
+
+    def test_disagreement_with_the_embedded_version_is_unknown(self):
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v24.22.1", embedded="24.14.0")
+        info = nra.BinaryInspector(exec_version=True).inspect(p, install_path=p, exec_path=p)
+        self.assertIsNone(info["version"])
+        self.assertIn("--version says v24.22.1", info["error"])
+        self.assertEqual(nra.judge_binary(info, FIXED)[0], "unknown")
+
+    def test_off_by_default(self):
+        p = os.path.join(self.d, "node")
+        script_binary(p, "v26.12.1", marker=os.path.join(self.d, "ran"))
+        info = nra.BinaryInspector().inspect(p, install_path=p, exec_path=p)
+        self.assertIsNone(info["version"])
+        self.assertFalse(os.path.exists(os.path.join(self.d, "ran")))
+
+
+class CleanTest(unittest.TestCase):
+    def test_control_characters_are_escaped(self):
+        self.assertEqual(nra.clean("a\x1b]0;t\x07b\x7f\x9b\n\tc \u00e9"),
+                         "a\\x1b]0;t\\x07b\\x7f\\x9b\\x0a\\x09c \u00e9")
+        tree = nra.clean_tree({"k\x1b": ["x\x1b", ("y\x07",)], 24: (24, 22, 1)})
+        self.assertEqual(tree, {"k\\x1b": ["x\\x1b", ("y\\x07",)], 24: (24, 22, 1)})
 
 
 class InstallsTest(unittest.TestCase):

@@ -83,5 +83,5 @@ From `doc/changelogs/CHANGELOG_V22.md`, `CHANGELOG_V24.md` and `CHANGELOG_V26.md
 
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: on the Pi, `pgrep -c node` and `pgrep -c -x node` both returned 0 while five processes ran a `node` binary, named `PM2 v6.0.14: Go`, `MainThread` and `next-server (v1` in `/proc/<pid>/comm`.
 
-- `examples/run-20261022T062905Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T06:29:05Z, as a normal user.
+- `examples/run-20261022T063927Z.txt` and `.json`: `node_runtime_audit.py --redact` on the Raspberry Pi we build on, 2026-10-22T06:39:27Z, as a normal user.
 - The production upgrade described in the post (six Node apps under pm2, installed with nvm) was done by the team on 21 October. Its details come from that work and are generalized; the lab reproduces the pm2 behaviors on a separate machine.

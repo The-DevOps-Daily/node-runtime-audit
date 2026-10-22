@@ -7,7 +7,7 @@ sudo python3 node_runtime_audit.py        # or without sudo: your own processes 
 
 Patching Node is a one-line version bump. Finding every Node your servers actually run is the work. This script lists the Node binary behind every running process and every place that will start Node later, and checks each one against the [Node.js security release of 21 October 2026](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases) (fixed in 22.23.4, 24.22.1 and 26.12.1; every end-of-life line counts as vulnerable).
 
-It is one file of standard-library Python (3.8+, Linux). It only reads: it never restarts, edits or upgrades anything.
+It is one file of standard-library Python (3.8+, Linux). It only reads: it never restarts, edits or upgrades anything, and by default it never runs a binary it finds (see Safety below).
 
 Written for the DevOps Daily post: https://devops-daily.com/posts/node-october-2026-security-release-find-every-node
 
@@ -15,7 +15,7 @@ Written for the DevOps Daily post: https://devops-daily.com/posts/node-october-2
 
 | Where | How |
 | --- | --- |
-| Running processes | `readlink /proc/<pid>/exe` for the real binary, then the version compiled into that file (read through `/proc/<pid>/exe`, so it works for deleted binaries and for processes inside containers). `--version` is also run when the file can only be changed by root or you, and the two must agree. |
+| Running processes | `readlink /proc/<pid>/exe` for the real binary, then the version compiled into that file (read through `/proc/<pid>/exe`, so it works for deleted binaries and for processes inside containers), or `include/node/node_version.h` of the same install. A version from a directory name alone is shown as a hint and stays unknown. |
 | pm2, live | `pm2 jlist` for your own `PM2_HOME` when its daemon is running: the daemon's binary, each entry's interpreter and script when they point into one Node install, the first `node` on the entry's saved `PATH` (or the daemon's Node for cluster mode, which forks workers from the daemon), and the Node processes really running under the entry. |
 | pm2, saved | `dump.pm2`, the list `pm2 resurrect` and a reboot start. |
 | Version managers | nvm, fnm, volta, asdf, mise, nodenv and n installs, and the default alias. |
@@ -49,11 +49,21 @@ for h in web1 web2; do ssh "$h" 'sudo python3 - --json' < node_runtime_audit.py 
 ## Results
 
 - `results/pm2-lab-20261022T063002Z.txt`: pm2 6.0.14 with Node v24.14.0 and v24.22.1.
-- `examples/run-20261022T062905Z.txt`: the script on our Raspberry Pi.
+- `examples/run-20261022T063927Z.txt`: the script on our Raspberry Pi.
 - `results/registry-20261022T062338Z.json`: 24 official tags, amd64 and arm64.
 - `results/pgrep-vs-proc-20261022T063334Z.txt`: `pgrep -c node` returns 0 on the Pi while five processes run a `node` binary.
 
 Facts and their sources are in [SOURCES.md](SOURCES.md).
+
+## Safety
+
+The script is meant to run as root on servers where other users run Node, so it treats everything it finds as untrusted:
+
+- **It does not execute the binaries it finds.** The version comes from the file itself: the `node-vX.Y.Z-headers.tar.gz` URL that official builds compile in, read through `/proc/<pid>/exe`, or `include/node/node_version.h` of the install. Running `<path> --version` as root on a path that another user controls would run their code as root.
+- **`--exec-version` is opt-in** and only runs a binary when root (or you, when you are not root) owns the file and every directory from `/` down to it, and none of them is writable by group or others. As root it refuses any binary not owned by root. The file is opened with `O_PATH | O_NOFOLLOW`, checked with `fstat` against the inode the process runs, and executed through `/proc/self/fd/N`, so it cannot be swapped between the check and the exec. If the result disagrees with the embedded version, the answer is unknown.
+- **Output is sanitized.** Command lines, process names, file names and container names and images come from other users and containers. Every control character (`0x00` to `0x1f`, `0x7f` and `0x80` to `0x9f`) is printed as `\xNN`, in text and in JSON, so nothing can send escape sequences to your terminal.
+- **Secrets stay out.** It prints only the first two arguments of a command line and drops any that contain `=`. From pm2 environments, crontabs and units it prints only the Node paths, never whole lines or other variables.
+- It only runs `pm2 jlist` for your own `PM2_HOME` and only when that daemon is already running, because `pm2 jlist` starts a daemon otherwise and, as root, would leave root-owned files in another user's `PM2_HOME`.
 
 ## Limits
 
